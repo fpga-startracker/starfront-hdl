@@ -1,0 +1,11 @@
+[project]
+name = "starfront-hdl"
+version = "0.1.0"
+description = "OV7670 star tracker front end on the ALINX AX7010 (Zynq-7000)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cocotb>=2.0.1",
+    "numpy>=2.0",
+    "pytest>=8.0",
+]
