@@ -13,13 +13,21 @@
 
 set script_dir [file dirname [file normalize [info script]]]
 set repo_dir   [file dirname $script_dir]
-set run_dir    "$repo_dir/build/starfront_bringup/starfront_bringup.runs/impl_1"
+set build_dir  "$repo_dir/build"
+set run_dir    "$build_dir/starfront_bringup/starfront_bringup.runs/impl_1"
 
-set bit_file "$run_dir/top_starfront_bringup.bit"
-set ltx_file "$run_dir/top_starfront_bringup.ltx"
+# Prefer the copies in build/, which survive a `create_project -force`; fall
+# back to the run directory for a project that has just been built in place.
+set bit_file "$build_dir/starfront_bringup.bit"
+set ltx_file "$build_dir/starfront_bringup.ltx"
 
 if {![file exists $bit_file]} {
-    error "ERROR: no bitstream at $bit_file - run ./scripts/build.sh impl first"
+    set bit_file "$run_dir/top_starfront_bringup.bit"
+    set ltx_file "$run_dir/top_starfront_bringup.ltx"
+}
+
+if {![file exists $bit_file]} {
+    error "ERROR: no bitstream found - run ./scripts/build.sh impl first"
 }
 
 open_hw_manager

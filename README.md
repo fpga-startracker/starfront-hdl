@@ -17,28 +17,46 @@ of PL logic.
 | M1 | 50 MHz → 25 MHz pixel + 125 MHz serial, DVI out over HDMI | **passed on hardware** |
 | M2 | SCCB master with **read**, camera ID probe, on-screen status | **passed on hardware** |
 | M3 | 94-register camera init + pixel stream geometry probe | **passed on hardware** |
-| M4 | 320×240 frame buffer → live image on HDMI | **passed on hardware** |
-| M5 | Grayscale astro profile, threshold + centroid engine | not started |
+| M4 | 320×240 RGB565 frame buffer → live image on HDMI | **passed on hardware** |
+| M5 | Streaming star detection at the camera's full 640×480 | **passed on hardware** |
+| M6 | Sub-pixel centroid, multiple markers, astro register profile | not started |
 
-**Camera bring-up is complete.** As of 2026-09-04 the board captures live video
-from an OV7670 on header J11 and displays it over HDMI at 640×480 @ 60 Hz.
-Everything through M4 meets timing (WNS +12.6 ns, 0 critical warnings) and the
-simulation suite passes 15/15.
+**Camera bring-up is complete, and the star detector works.** As of 2026-09-04
+the board captures live video from an OV7670 on header J11 and displays it over
+HDMI at 640×480 @ 60 Hz, and the streaming detector picks bright points out of
+the camera's full-resolution stream and tracks them live. Everything meets
+timing with 0 critical warnings, and the simulation suite passes 20/20.
 
-What remains is the star tracker itself, which starts at M5.
+## Two build variants
+
+One source tree, two bitstreams, so the plain camera bring-up stays available
+for demonstration without rebuilding it every time the star work moves.
+
+| Variant | Contains | `ENABLE_STARS` |
+|---|---|---|
+| `bringup` | camera bring-up only, M0–M4 | 0 |
+| `tracker` | the above plus the streaming star detector, M5 | 1 |
+
+```bash
+./scripts/build.sh impl bringup     # -> build/starfront_bringup.bit
+./scripts/build.sh impl tracker     # -> build/starfront_tracker.bit
+./scripts/build.sh impl all         # both
+
+./scripts/program.sh bringup
+```
 
 ## Quick start
 
 ```bash
-# Build the bitstream (Vivado 2025.2)
-./scripts/build.sh impl          # -> build/starfront_bringup.bit
+# Build both bitstreams (Vivado 2025.2)
+./scripts/build.sh impl all
 
-# Load it over the board's USB JTAG
-vivado -mode batch -source scripts/program.tcl
+# Load one over the board's USB JTAG (works from any directory)
+./scripts/program.sh tracker
 
 # Run the simulations (Icarus Verilog + cocotb)
 uv sync
-for s in tmds sccb vga capture; do
+for s in tmds sccb vga capture star; do
   (cd sim/$s && ../../.venv/bin/python test_runner_$s.py)
 done
 ```
