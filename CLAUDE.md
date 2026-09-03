@@ -9,24 +9,33 @@ Current goal is camera bring-up: an **OV7670** on expansion header J11, with a
 live 640×480 image out of the board's HDMI connector. Verilog, PL-only (no Zynq
 PS), Vivado 2025.2, simulated with cocotb + Icarus Verilog.
 
-Milestones M0–M4 are built and pass simulation. M0 and M1 are confirmed working
-on a board; M2–M4 are awaiting hardware. M5 (grayscale astro register profile,
-threshold + centroid engine) is next. See `docs/bringup_checklist.md` for the
-status table and the pass criteria.
+Milestones M0–M5 all pass on hardware: live OV7670 video over HDMI, and a
+streaming star detector that tracks bright points at the camera's full 640×480.
+See `docs/bringup_checklist.md` for the status table and the pass criteria.
+
+The design builds as **two variants** from one source tree, selected by the
+`ENABLE_STARS` parameter on `top_starfront`: `bringup` (M0–M4, camera only) and
+`tracker` (adds M5). They are separate Vivado projects and separate bitstreams
+under `build/`.
 
 ## Commands
 
 ```bash
-./scripts/build.sh              # create the Vivado project only
-./scripts/build.sh impl         # + synthesise, implement, write the bitstream
+./scripts/build.sh impl bringup   # camera bring-up only
+./scripts/build.sh impl tracker   # + star detector
+./scripts/build.sh impl all       # both
 
-uv sync                         # cocotb + numpy + pytest into .venv
+./scripts/program.sh <variant>       # bringup | tracker
+
+uv sync                           # cocotb + numpy + pytest into .venv
 cd sim/<subsystem> && ../../.venv/bin/python test_runner_<subsystem>.py
 ```
 
-Simulation subsystems: `tmds`, `sccb`, `vga`, `capture`. Reports from a build
-land in `build/timing_summary.rpt` and `build/utilization.rpt`.
-`scripts/program.tcl` loads the bitstream over the board's USB JTAG.
+Simulation subsystems: `tmds`, `sccb`, `vga`, `capture`, `star`. Reports land in
+`build/starfront_<variant>_timing.rpt` and `..._utilization.rpt`.
+
+`build.sh` decides success from the `INFO: BUILD COMPLETE` marker, not the exit
+code — Vivado batch mode exits 0 even when a Tcl error aborts the script.
 
 Note: plain `cd` misbehaves in this user's zsh. Use `env -C <dir> <cmd>` from
 tool calls.
@@ -49,7 +58,7 @@ These are the ones that repeatedly matter; the full tables are in
 ## Architecture
 
 ```
-top_starfront_bringup
+top_starfront   (parameter ENABLE_STARS)
 ├── clk_wiz_0         MMCM: 50 MHz -> 125 MHz (clk_ser) + 25 MHz (clk_pix)
 ├── sccb_master       SCCB with read; exposes _out/_oe/_in, IOBUF is in the top
 ├── sccb_probe        reset, read PID/VER, write+read-back, retry ~2 Hz
@@ -60,6 +69,9 @@ top_starfront_bringup
 ├── cam_capture       RGB444 3-stage pipeline, 2:1 downsample to 320x240
 ├── fb_mem            inferred dual-clock block RAM, 320x240 x 12 bit
 ├── fb_reader         2x pixel doubling, RGB444 -> RGB888
+├── cam_pixel_stream  full 640x480 tap: one pixel per strobe + luminance   [M5]
+├── star_detect       5x5 window, peak + centroid, adaptive threshold      [M5]
+│   └── line_buffer   x4, distributed RAM - no block RAM at all
 ├── vga_sync_gen      640x480 @ 60 Hz timing, both sync polarities
 ├── status_overlay    hex digits via hex_font, plus a flag row of blocks
 ├── key_debounce      x2  KEY2 (overlay) and KEY3 (colour bars)
@@ -78,6 +90,13 @@ TMDS serialisers only), `cam_pclk` (25 MHz from the camera, capture and the
 stream probe). The XDC declares `sys_clk` and `cam_pclk` asynchronous; crossings
 go through `cdc_sync`, a toggle handshake in `cam_stream_probe`, and the
 dual-clock block RAM in `fb_mem`.
+
+**Why the star detector streams:** buffering a 640x480 frame at 8 bits needs 75
+BRAM tiles and the 7z010 has 60, so the detector works from a five-row sliding
+window instead - four line buffers, ~20 Kbit, in LUTs. That is what lets it run
+at the camera's full resolution while the display path settles for a quarter of
+it. Block RAM is the binding resource here; see the headroom table in
+`docs/bringup_checklist.md` before adding anything that needs it.
 
 **Display pipeline latency:** both pixel sources are arranged to have exactly
 one clock of latency — the block RAM registers its output, and the overlay is

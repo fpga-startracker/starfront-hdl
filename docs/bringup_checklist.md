@@ -11,8 +11,11 @@ Basys 3 project's `Agent.md` warns about at length.
 | M0 | Toolchain, project generator, LEDs | done | – | **passed 2026-09-04** |
 | M1 | Clocking + HDMI output | done | tmds, vga | **passed 2026-09-04** |
 | M2 | SCCB read + camera ID probe | done | sccb | **passed 2026-09-04** |
-| M3 | Camera init + pixel stream geometry probe | done | – | passed by implication; numbers not yet recorded |
+| M3 | Camera init + pixel stream geometry probe | done | – | **passed 2026-09-04** — `0500 01E0` |
 | M4 | Frame buffer + live image | done | capture | **passed 2026-09-04** |
+| M5 | Streaming star detection at full 640×480 | done | star | **passed 2026-09-04** — tracks a phone torch in a dark room |
+
+The `bringup` build variant stops after M4; `tracker` adds M5.
 
 A live image on screen means M2 and M4 both hold: the image only replaces the
 overlay once `init_done` is high, and `init_done` only happens after the ID
@@ -22,7 +25,8 @@ hold KEY2 and read row 1, which should say `0500 01E0`.
 ## What the board shows you
 
 **Keys:** KEY1 reset · KEY2 hold to force the status overlay over a live image ·
-KEY3 toggle the sensor's colour bar test pattern.
+KEY3 toggle the sensor's 8-bar colour test pattern · KEY4 step the horizontal
+window position (see pitfall 9 in `docs/ov7670_notes.md`).
 
 **LEDs (active low — lit means the signal is high):**
 
@@ -39,7 +43,7 @@ eight large hex digits; row 3 is eight blocks.
 | Area | Content | Expect |
 |---|---|---|
 | banner | red = no camera, amber = camera but bad stream, green = all good | green |
-| row 0, red tab | `PID VER` then `__ readback` | `7673 0001` |
+| row 0, red tab | `PID VER`, window selection, register read-back | `7673 0001` |
 | row 1, green tab | `bytes/line` then `lines/frame` | `0500 01E0` |
 | row 2, blue tab | `PCLK / 100 kHz` then `frames/sec` | `00FA 001E` |
 | row 3, amber tab | `id_ok rw_ok init_done stream_ok data href vsync pclk` | all eight lit |
@@ -134,6 +138,41 @@ Then, in order:
 Reads work and writes do not. Check that SIO_D is not being held by something
 else on the bus, and that the module has no series resistor on SIOD that
 prevents the FPGA pulling it fully low.
+
+## Close the project in the GUI before building
+
+`create_project -force` deletes and recreates `build/<project>/`. If the Vivado
+GUI has that project open it holds its own copy in memory and writes it back
+over the generated one, which produces two confusing failures:
+
+- the GUI reports `Synthesis Failed: <top>.dcp does not exist`, for files the
+  build had already replaced underneath it;
+- the `.xpr` on disk ends up as whatever the GUI remembered, which is how a
+  project that had just built all eighteen sources came to list only twelve.
+
+`scripts/build.sh` now refuses to run while another Vivado session is open.
+Close the project (File > Close Project) and re-open it after the build.
+
+## Resource headroom
+
+Block RAM is the binding constraint on this part, and it is nearly all frame
+buffer:
+
+| | tiles |
+|---|---|
+| RGB565 frame buffer, 320x240 x 16 bit | 48 |
+| ILA, 1024 deep x ~93 probe bits | ~3 |
+| star detector line buffers | 0 - distributed RAM, ~570 LUTs |
+| **available** | **60** |
+
+The streaming star detector deliberately costs no block RAM: four line buffers
+are 20 Kbit and go in LUTs. That is the whole reason it processes at the
+camera's full 640x480 while the display path settles for a quarter of that -
+buffering a 640x480 frame at 8 bits would need 75 tiles.
+
+If something needs more block RAM, in order: shrink or drop the ILA (bring-up
+is what it was there for), then move the display buffer to 8-bit grayscale,
+which roughly halves it.
 
 ## M3 — camera init and pixel stream geometry
 
