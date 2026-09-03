@@ -2,16 +2,17 @@
 
 //============================================================================
 // Module: cam_capture
-// Description: OV7670 RGB444 pixel capture pipeline, entirely in the PCLK domain.
+// Description: OV7670 RGB565 pixel capture pipeline, entirely in the PCLK domain.
 //
 // Ported unchanged in behaviour from the Basys 3 project's rgb444_capture, where
 // it produced a correct live image. The three-cycle pipeline and the pixel_active
 // guard below are not stylistic - each one fixes a specific bug that took days to
 // find. See docs/ov7670_notes.md pitfalls 1 and 4 before touching either.
 //
-// The camera outputs two bytes per pixel in xRGB format (0x8C=0x02):
-//   Byte 1 (even PCLK): { x, x, x, x, R[3:0] }
-//   Byte 2 (odd  PCLK): { G[3:0], B[3:0] }
+// The camera outputs two bytes per pixel in RGB565:
+//   Byte 1 (even PCLK): { R[4:0], G[5:3] }
+//   Byte 2 (odd  PCLK): { G[2:0], B[4:0] }
+// so the stored pixel is simply the two bytes concatenated - no repacking.
 //
 // 3-cycle register pipeline avoids combinational read of ov7670_data
 // during BRAM write (prevents metastability / rainbow noise):
@@ -32,7 +33,7 @@ module cam_capture (
 
     output reg         cap_wr_en  = 1'b0,
     output reg  [16:0] cap_addr   = 17'd0,
-    output reg  [11:0] cap_data   = 12'd0
+    output reg  [15:0] cap_data   = 16'd0
 );
 
     reg [10:0] pclk_cnt     = 11'd0;
@@ -74,12 +75,10 @@ module cam_capture (
 
                 // Delayed BRAM write from PREVIOUS pixel pair
                 if (pixel_rdy) begin
-                    // RGB444 "xR GB" format:
-                    //   byte1 = { xxxx, R[3:0] }
-                    //   byte2 = { G[3:0], B[3:0] }
-                    cap_data  <= { byte1_reg[3:0],    // R[3:0]
-                                   byte2_reg[7:4],    // G[3:0]
-                                   byte2_reg[3:0] };  // B[3:0]
+                    // Both bytes are fully registered by now, which is the
+                    // whole point of the pipeline - reading the bus here
+                    // instead is what produced rainbow noise on the Basys 3.
+                    cap_data  <= { byte1_reg, byte2_reg };   // RGB565
                     cap_addr  <= pixel_addr;
                     cap_wr_en <= 1'b1;
                 end

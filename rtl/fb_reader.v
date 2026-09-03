@@ -6,7 +6,7 @@
 //              pixel doubling so the 320x240 buffer fills the 640x480 screen.
 //
 //   Ported from the Basys 3 vga_controller, minus the sync generator (which
-//   lives separately here) and with the 4-bit channels expanded to the 8-bit
+//   lives separately here) and with the RGB565 channels expanded to the 8-bit
 //   ones the TMDS encoder wants.
 //
 //   Latency is one clock: fb_addr_rd is combinational from the pixel position,
@@ -20,7 +20,7 @@ module fb_reader (
     input  wire        active,       // already delayed to match fb_data_rd
 
     output wire [16:0] fb_addr_rd,
-    input  wire [11:0] fb_data_rd,   // {R[3:0], G[3:0], B[3:0]}
+    input  wire [15:0] fb_data_rd,   // {R[4:0], G[5:0], B[4:0]}
 
     output wire [7:0]  r,
     output wire [7:0]  g,
@@ -42,10 +42,16 @@ module fb_reader (
                       + {8'b0, logical_x};
 
     //------------------------------------------------------------------------
-    // RGB444 -> RGB888 by nibble replication, so 0xF maps to 0xFF not 0xF0
+    // RGB565 -> RGB888. The top bits are replicated into the low ones so that
+    // an all-ones channel maps to 0xFF rather than 0xF8, which would otherwise
+    // stop white from ever being white.
     //------------------------------------------------------------------------
-    assign r = active ? {fb_data_rd[11:8], fb_data_rd[11:8]} : 8'h00;
-    assign g = active ? {fb_data_rd[7:4],  fb_data_rd[7:4]}  : 8'h00;
-    assign b = active ? {fb_data_rd[3:0],  fb_data_rd[3:0]}  : 8'h00;
+    wire [4:0] r5 = fb_data_rd[15:11];
+    wire [5:0] g6 = fb_data_rd[10:5];
+    wire [4:0] b5 = fb_data_rd[4:0];
+
+    assign r = active ? {r5, r5[4:2]} : 8'h00;
+    assign g = active ? {g6, g6[5:4]} : 8'h00;
+    assign b = active ? {b5, b5[4:2]} : 8'h00;
 
 endmodule

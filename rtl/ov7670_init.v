@@ -27,9 +27,11 @@ module ov7670_init
     input  wire        clk,
     input  wire        rst,
 
-    // Toggling this re-runs the whole table with the new setting, so the
-    // sensor test pattern can be switched on the bench rather than rebuilt in.
+    // Changing either of these re-runs the whole table with the new setting, so
+    // the test pattern and the window position can be tuned on the bench rather
+    // than costing a rebuild each time.
     input  wire        color_bar,
+    input  wire [1:0]  hstart_sel,
 
     // Status
     output wire        init_done,      // High when all registers written
@@ -85,18 +87,21 @@ module ov7670_init
     wire [15:0] rom_data;
 
     ov7670_registers u_regs (
-        .index     ( reg_index ),
-        .color_bar ( color_bar ),
-        .data      ( rom_data  )
+        .index      ( reg_index  ),
+        .color_bar  ( color_bar  ),
+        .hstart_sel ( hstart_sel ),
+        .data       ( rom_data   )
     );
 
     //------------------------------------------------------------------------
     // Latch a change of color_bar until the sequencer is idle enough to act on
     // it - the change is a single cycle and the FSM is usually mid-transaction.
     //------------------------------------------------------------------------
-    reg color_bar_d = 1'b0;
-    reg cfg_dirty   = 1'b0;
-    wire cfg_changed = (color_bar != color_bar_d);
+    wire [2:0] cfg = {hstart_sel, color_bar};
+
+    reg [2:0] cfg_d     = 3'd0;
+    reg       cfg_dirty = 1'b0;
+    wire cfg_changed = (cfg != cfg_d);
 
     //------------------------------------------------------------------------
     // Output assignments
@@ -116,10 +121,10 @@ module ov7670_init
             delay_cnt      <= PWRUP_DELAY;
             sccb_start_reg <= 1'b0;
             init_done_reg  <= 1'b0;
-            color_bar_d    <= color_bar;
+            cfg_d          <= cfg;
             cfg_dirty      <= 1'b0;
         end else begin
-            color_bar_d <= color_bar;
+            cfg_d <= cfg;
             sccb_start_reg <= 1'b0;  // Default: no start pulse
 
             case (state)

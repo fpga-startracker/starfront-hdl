@@ -54,19 +54,77 @@ project uses `0xC0` (gamma enable plus UV saturation auto-adjust).
 A single swapped data bit produces subtle, persistent colour errors that cannot
 be fixed in logic. Cross-check the whole bus before believing any colour bug.
 
-### 7. RGB444 byte order in xRGB mode
+### 7. Pixel format: RGB565, not RGB444
 
-With `0x8C = 0x02`, byte 1 is `{x,x,x,x,R[3:0]}` and byte 2 is
-`{G[3:0],B[3:0]}`, so the 12-bit pixel is `{byte1[3:0], byte2[7:4], byte2[3:0]}`.
-This is **not** the RGB565 order most tutorials describe. If colours look wrong,
-suspect the register config (pitfall 2) before the byte order.
+This project started on RGB444 (`0x8C = 0x02`), inherited from the Basys 3
+design, and moved to RGB565 once there was a live picture to look at. Four bits
+per channel is sixteen levels: in a dim scene nearly every pixel sits in the
+bottom two or three of them, so one LSB of sensor noise is a sixth of the signal
+and the image looks like coloured static. RGB565 gives green six bits and red
+and blue five.
 
-### 8. Use the built-in colour bars to split the problem in two
+The switch is one register - `0x8C = 0x00` disables RGB444, and `COM15 = 0xD0`
+already selects RGB565 in bits[5:4]. It is not free in memory though: the frame
+buffer went from 36 to 48 RAMB36 tiles, and with the ILA that is 54 of the 60
+the 7z010 has.
 
-Setting `0x70` from `0x3A` to `0xBA` turns on the sensor's 8-bar test pattern,
-which bypasses the image sensor entirely. Correct bars mean the capture path,
-frame buffer and display are all fine and any remaining problem is in the
-sensor's ISP configuration. Wrong bars mean the problem is in the FPGA.
+RGB565 byte order (with `TSLB[3] = 0`):
+
+    Byte 1: { R[4:0], G[5:3] }
+    Byte 2: { G[2:0], B[4:0] }
+
+so the stored pixel is simply the two bytes concatenated. If the colours come
+out scrambled in a way that looks like channels bleeding into each other, try
+`TSLB` (`0x3A`) `= 0x0C` to swap the byte order. If they are merely *wrong*
+rather than scrambled, it is the register config (pitfall 2), not the order.
+
+### 8. Use the built-in colour bars to split the problem in two - but set the right register
+
+The sensor has a digital test pattern generator that bypasses the pixel array
+and the whole analog chain. A clean, stable pattern means the data bus, the
+capture pipeline, the frame buffer and the display are all correct, and anything
+left is the sensor's ISP or the optics. A speckled pattern means bit errors on
+the data bus.
+
+The selector is two bits, **`(SCALING_YSC[7], SCALING_XSC[7])`**:
+
+| Value | Pattern |
+|---|---|
+| `00` | none |
+| `01` | shifting "1" - fine vertical stripes |
+| `10` | **8-bar colour bar** |
+| `11` | fade-to-gray colour bar |
+
+The Basys 3 project's notes said to set `0x70` (SCALING_XSC) bit 7 for the
+colour bars. That is wrong, and confirmed wrong on hardware: it gives the
+shifting "1" pattern. The colour bar needs **`0x71` (SCALING_YSC) bit 7**, i.e.
+`0x71 = 0xB5`, with `0x70` left at `0x3A`.
+
+The shifting "1" is not useless - it is arguably the better wiring test, since
+any bit error breaks its regularity immediately.
+
+### 9. A band of junk down one edge is the window, not the FPGA
+
+HSTART and HSTOP choose which 640 of the sensor's 784 column clocks are emitted.
+Put that window over the array's dummy columns and those pixels come out as
+garbage - and no FPGA-side work can recover them, because the data was never
+there. Four positions that are all exactly 640 wide:
+
+| `hstart_sel` | HSTART / HSTOP / HREF | window starts at | |
+|---|---|---|---|
+| 0 | `0x16` / `0x04` / `0x80` | 176 | the Basys 3 value - **shows the junk band on this board** |
+| 1 | `0x13` / `0x01` / `0xB6` | 158 | Linux `ov7670.c` - **clean, and the default** |
+| 2 | `0x12` / `0x00` / `0x80` | 144 | |
+| 3 | `0x18` / `0x06` / `0x80` | 192 | |
+
+KEY4 steps through them at runtime and the current selection shows on the
+overlay, so finding the right one is a few button presses rather than a rebuild
+each time. Confirmed on hardware 2026-09-04: position 0 has the band, position 1
+does not.
+
+    HSTART_full = (0x17 << 3) | HREF[2:0]
+    HSTOP_full  = (0x18 << 3) | HREF[5:3]
+    width       = (HSTOP_full - HSTART_full) mod 784
 
 ## Timing numbers (from the OV7670 datasheet)
 
@@ -83,6 +141,31 @@ At 25 MHz XCLK that is a 25 MHz PCLK and, because YUV and RGB modes send two
 bytes per pixel, a 12.5 Mpixel/s rate. The Basys 3 XDC constrained PCLK at
 12.5 MHz, which under-constrained the input path; this project constrains it at
 25 MHz (40 ns).
+
+### 10. A band drifting down the screen on fast motion is tearing, not a bug
+
+There is one frame buffer, and the camera writes into it while the display
+reads out of it. Where the two pointers cross, the top of the screen shows one
+frame and the bottom shows the next, which reads as a horizontal seam. It only
+becomes visible when something in shot moves fast enough for the two halves to
+disagree.
+
+The seam drifts because the two frame rates are close but not related:
+
+    display frame  800 x 521           = 416,800 clocks = 16.67 ms
+    camera frame   784 x 510 x 2 bytes = 799,680 clocks = 31.99 ms
+
+a ratio of 1.919, not 2, so the crossing point walks slowly down the picture.
+
+Removing it properly needs a second frame buffer to capture into while the
+first is displayed. That does not fit: RGB565 costs 48 of the 60 BRAM tiles and
+two of them would need 96. It becomes affordable at 8 bits per pixel, which is
+where the grayscale astro path is heading anyway.
+
+It is worth being clear that this does not matter for the actual application.
+Star fields do not move fast, and the centroid engine planned for M5 processes
+the pixel stream as it arrives rather than reading this buffer at all - the
+frame buffer exists so a human can see what the camera sees.
 
 ## Register identity
 

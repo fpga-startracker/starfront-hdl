@@ -8,10 +8,19 @@
 // table produced a correct live colour image. Sources: westonb/OV7670-Verilog
 // (MIT 6.111), the Linux kernel ov7670.c driver, and the Hamsterworks project.
 //
-// Output format: RGB444 xRGB byte order (0x8C = 0x02), full VGA 640x480 with
-// camera-side scaling OFF - the FPGA does the downsampling.
+// Output format: RGB565 (COM15[5:4] = 01, with RGB444 switched off at 0x8C),
+// full VGA 640x480 with camera-side scaling OFF - the FPGA does the
+// downsampling. RGB565 replaced the original RGB444 because four bits per
+// channel is only sixteen levels: in a dim scene almost every pixel sits in the
+// bottom two or three of them, so a single LSB of sensor noise is a sixth of the
+// signal and the picture looks like coloured static. Green gets six bits here
+// and red and blue five, which is three to four times finer.
 //
-// color_bar selects the sensor's built-in 8-bar test pattern (SCALING_XSC bit 7).
+// color_bar selects the sensor's built-in 8-bar test pattern. Per the datasheet
+// the two selector bits are (SCALING_YSC[7], SCALING_XSC[7]) in that order:
+// 01 is a shifting "1", 10 is the 8-bar colour bar. Setting XSC[7] alone - which
+// is what the Basys 3 project's notes said to do - gives the shifting pattern,
+// confirmed on hardware. The colour bar needs YSC[7].
 // The bars bypass the image sensor entirely, which splits "is the problem in the
 // FPGA or in the camera?" in one step - see docs/ov7670_notes.md, pitfall 8.
 // It is an input rather than a parameter so KEY3 can toggle it on the bench
@@ -24,9 +33,44 @@
 
 module ov7670_registers (
     input  wire [7:0]  index,
-    input  wire        color_bar,   // 1 = sensor test pattern instead of the image
+    input  wire        color_bar,    // 1 = 8-bar test pattern instead of the image
+    input  wire [1:0]  hstart_sel,   // horizontal window position, see below
     output reg  [15:0] data
 );
+
+    //------------------------------------------------------------------------
+    // Horizontal window position.
+    //
+    // HSTART and HSTOP pick which 640 of the sensor's 784 column clocks come
+    // out. All four options below are 640 wide; they differ only in where that
+    // window sits. Landing it over the array's dummy columns produces a band of
+    // junk at one edge of the picture, which is not fixable downstream - so the
+    // position is selectable at runtime rather than being a rebuild away.
+    //
+    //   HSTART_full = (0x17 << 3) | HREF[2:0]
+    //   HSTOP_full  = (0x18 << 3) | HREF[5:3]
+    //   width       = (HSTOP_full - HSTART_full) mod 784
+    //------------------------------------------------------------------------
+    reg [7:0] hstart_reg;
+    reg [7:0] hstop_reg;
+    reg [7:0] href_reg;
+
+    always @(*) begin
+        case (hstart_sel)
+        2'd0: begin   // start 176 - as inherited from the Basys 3 project
+            hstart_reg = 8'h16; hstop_reg = 8'h04; href_reg = 8'h80;
+        end
+        2'd1: begin   // start 158 - the Linux kernel ov7670.c values
+            hstart_reg = 8'h13; hstop_reg = 8'h01; href_reg = 8'hB6;
+        end
+        2'd2: begin   // start 144
+            hstart_reg = 8'h12; hstop_reg = 8'h00; href_reg = 8'h80;
+        end
+        default: begin // start 192
+            hstart_reg = 8'h18; hstop_reg = 8'h06; href_reg = 8'h80;
+        end
+        endcase
+    end
 
     localparam SENTINEL = 16'hFF_FF;
 
@@ -42,8 +86,8 @@ module ov7670_registers (
         // OUTPUT FORMAT — RGB444
         //==============================================================
         8'd1:  data = 16'h12_04;  // COM7: RGB output
-        8'd2:  data = 16'h40_D0;  // COM15: Full range + COM15[4]=1 (required for RGB444)
-        8'd3:  data = 16'h8C_02;  // RGB444: Enable, format xRGB (xxxxRRRR GGGGBBBB)
+        8'd2:  data = 16'h40_D0;  // COM15: full 00-FF range, bits[5:4]=01 = RGB565
+        8'd3:  data = 16'h8C_00;  // RGB444 off, so COM15[5:4] = 01 selects RGB565
         8'd4:  data = 16'h04_00;  // COM1: No CCIR656
 
         //==============================================================
@@ -115,9 +159,9 @@ module ov7670_registers (
         //==============================================================
         // WINDOW / TIMING
         //==============================================================
-        8'd51: data = 16'h17_16;  // HSTART (original working value)
-        8'd52: data = 16'h18_04;  // HSTOP  (original working value)
-        8'd53: data = 16'h32_80;  // HREF
+        8'd51: data = {8'h17, hstart_reg};   // HSTART, see hstart_sel above
+        8'd52: data = {8'h18, hstop_reg};    // HSTOP
+        8'd53: data = {8'h32, href_reg};     // HREF (low bits of both, plus edge offset)
         8'd54: data = 16'h19_03;  // VSTRT
         8'd55: data = 16'h1A_7B;  // VSTOP
         8'd56: data = 16'h03_00;  // VREF (original working value)
@@ -129,9 +173,10 @@ module ov7670_registers (
         //==============================================================
         8'd57: data = 16'h0C_00;  // COM3: Scaling DISABLED
         8'd58: data = 16'h3E_00;  // COM14: Normal PCLK
-        // SCALING_XSC bit[7]: 0 = normal image, 1 = 8-bar colour test pattern
-        8'd59: data = color_bar ? 16'h70_BA : 16'h70_3A;
-        8'd60: data = 16'h71_35;  // SCALING_YSC
+        // Test pattern select is (SCALING_YSC[7], SCALING_XSC[7]):
+        //   00 none, 01 shifting "1", 10 eight-bar colour bar, 11 fade to gray
+        8'd59: data = 16'h70_3A;                            // SCALING_XSC[7] = 0
+        8'd60: data = color_bar ? 16'h71_B5 : 16'h71_35;    // SCALING_YSC[7] = colour bar
         8'd61: data = 16'h72_11;  // SCALING_DCWCTR (no effect when COM3[3:2]=0)
         8'd62: data = 16'h73_F0;  // SCALING_PCLK_DIV
         8'd63: data = 16'hA2_02;  // SCALING_PCLK_DELAY
