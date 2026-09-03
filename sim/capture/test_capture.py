@@ -3,7 +3,7 @@
 This is the path that produced rainbow noise and coloured left edges on the
 predecessor board, so the checks here are deliberately about those two bugs:
 
-  * every captured pixel must carry the RGB444 value of the pixel it came from,
+  * every captured pixel must carry the RGB565 value of the pixel it came from,
     which only holds if both bytes are read from registers rather than straight
     off the bus (docs/ov7670_notes.md, pitfall 1);
   * pixel 0 of each line must never be written, because the staging registers
@@ -25,8 +25,19 @@ FB_STRIDE = 320
 
 
 def src_rgb(x, y):
-    """Test pattern: distinct per pixel, and different in all three channels."""
-    return ((x + y) & 0xF, (x * 3) & 0xF, (y * 5 + 1) & 0xF)
+    """Test pattern: distinct per pixel, and different in all three channels.
+    Channel widths follow RGB565."""
+    return ((x + y) & 0x1F, (x * 3) & 0x3F, (y * 5 + 1) & 0x1F)
+
+
+def rgb565_bytes(r, g, b):
+    """The two bytes an OV7670 emits for one RGB565 pixel."""
+    return (r << 3) | (g >> 3), ((g & 0x07) << 5) | b
+
+
+def rgb565_word(r, g, b):
+    hi, lo = rgb565_bytes(r, g, b)
+    return (hi << 8) | lo
 
 
 async def send_frame(dut, n_pixels, n_lines):
@@ -43,10 +54,10 @@ async def send_frame(dut, n_pixels, n_lines):
         await FallingEdge(dut.pclk)
         dut.href.value = 1
         for x in range(n_pixels):
-            r, g, b = src_rgb(x, y)
-            dut.data.value = r                    # byte 1: {xxxx, R[3:0]}
+            hi, lo = rgb565_bytes(*src_rgb(x, y))
+            dut.data.value = hi                   # byte 1: {R[4:0], G[5:3]}
             await FallingEdge(dut.pclk)
-            dut.data.value = (g << 4) | b         # byte 2: {G[3:0], B[3:0]}
+            dut.data.value = lo                   # byte 2: {G[2:0], B[4:0]}
             await FallingEdge(dut.pclk)
         dut.href.value = 0
         await ClockCycles(dut.pclk, 6)
@@ -67,9 +78,8 @@ def expected_buffer(n_pixels, n_lines):
                 continue                       # pixel_active guard
             if x + 1 >= n_pixels:
                 continue                       # write lands on the next pixel
-            r, g, b = src_rgb(x, y)
             addr = (y // 2) * FB_STRIDE + (x // 2)
-            out[addr] = (r << 8) | (g << 4) | b
+            out[addr] = rgb565_word(*src_rgb(x, y))
     return out
 
 
@@ -111,7 +121,7 @@ async def test_pixels_land_correctly(dut):
         got = await read_fb(dut, addr)
         want = expect[addr]
         assert got == want, (
-            f"frame buffer[{addr}] = 0x{got:03X}, expected 0x{want:03X} "
+            f"frame buffer[{addr}] = 0x{got:04X}, expected 0x{want:04X} "
             f"(pixel x={(addr % FB_STRIDE) * 2}, y={(addr // FB_STRIDE) * 2})"
         )
 
@@ -178,6 +188,6 @@ async def test_vsync_resets_position(dut):
     for addr in sorted(expect):
         got = await read_fb(dut, addr)
         assert got == expect[addr], (
-            f"after two frames, buffer[{addr}] = 0x{got:03X}, "
-            f"expected 0x{expect[addr]:03X}"
+            f"after two frames, buffer[{addr}] = 0x{got:04X}, "
+            f"expected 0x{expect[addr]:04X}"
         )

@@ -19,12 +19,12 @@ module cam_capture_tb_wrapper (
     // Read-back side, driven by the testbench
     input  wire        rd_clk,
     input  wire [16:0] rd_addr,
-    output wire [11:0] rd_data,
+    output wire [15:0] rd_data,
 
     // Observation
     output wire        cap_wr_en,
     output wire [16:0] cap_addr,
-    output wire [11:0] cap_data
+    output wire [15:0] cap_data
 );
 
     cam_capture u_capture (
