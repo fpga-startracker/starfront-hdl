@@ -150,8 +150,24 @@ over the generated one, which produces two confusing failures:
 - the `.xpr` on disk ends up as whatever the GUI remembered, which is how a
   project that had just built all eighteen sources came to list only twelve.
 
-`scripts/build.sh` now refuses to run while another Vivado session is open.
-Close the project (File > Close Project) and re-open it after the build.
+The second failure is the nastier one, because the GUI writes the project back
+**when it closes**, which can be hours after the build it invalidated. A GUI
+left open all morning turned a working `bringup` project into one that still
+named `top_starfront_bringup.v`, months-old file list and all, long after the
+rename to `top_starfront.v` had been built, programmed and committed.
+
+`scripts/build.sh` and `scripts/program.sh` refuse to run while another Vivado
+session is open. `scripts/open_gui.sh <variant>` compares the project against
+`rtl/` before opening it, so drift is caught in a second rather than in a
+synthesis run:
+
+```bash
+./scripts/open_gui.sh bringup            # opens it, or explains what drifted
+./scripts/open_gui.sh bringup --regen    # rebuild the project first
+```
+
+Regenerating discards `synth_1` and `impl_1`, but never the bitstream: the build
+copies `.bit` and `.ltx` up into `build/` precisely so `program.sh` survives it.
 
 ## Resource headroom
 
