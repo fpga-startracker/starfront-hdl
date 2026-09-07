@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Vivado
+build/
+*.jou
+*.log
+.Xil/
+vivado*.str
+usage_statistics_webtalk*
+
+# cocotb / Icarus
+sim_build/
+results.xml
+*.vcd
+*.fst
