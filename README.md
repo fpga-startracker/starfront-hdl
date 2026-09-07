@@ -43,6 +43,7 @@ for demonstration without rebuilding it every time the star work moves.
 ./scripts/build.sh impl all         # both
 
 ./scripts/program.sh bringup
+./scripts/open_gui.sh bringup       # open the GUI on a checked project
 ```
 
 ## Quick start
@@ -114,7 +115,7 @@ board, and wire the camera per
 rtl/          synthesisable Verilog
 constraints/  ax7010_starfront.xdc - pins and timing
 sim/          cocotb testbenches (tmds, sccb, vga) and models
-scripts/      create_project.tcl and build.sh
+scripts/      create_project.tcl, build.sh, program.sh, open_gui.sh
 docs/         pinout, wiring, OV7670 notes, bring-up checklist, conventions
 build/        generated, not version controlled
 ```

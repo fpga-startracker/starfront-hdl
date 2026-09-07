@@ -26,6 +26,7 @@ under `build/`.
 ./scripts/build.sh impl all       # both
 
 ./scripts/program.sh <variant>       # bringup | tracker
+./scripts/open_gui.sh <variant>      # open the GUI, refusing a stale project
 
 uv sync                           # cocotb + numpy + pytest into .venv
 cd sim/<subsystem> && ../../.venv/bin/python test_runner_<subsystem>.py
@@ -36,6 +37,14 @@ Simulation subsystems: `tmds`, `sccb`, `vga`, `capture`, `star`. Reports land in
 
 `build.sh` decides success from the `INFO: BUILD COMPLETE` marker, not the exit
 code — Vivado batch mode exits 0 even when a Tcl error aborts the script.
+
+**Never leave a project open in the GUI across a build.** `create_project -force`
+deletes and rebuilds `build/<project>/`, but a GUI holding that project keeps its
+own copy in memory and writes it back on exit — hours later, silently. Both times
+this happened the result was a `.xpr` naming sources that had since been renamed,
+so synthesis failed on files the build had already replaced. `build.sh` and
+`program.sh` refuse to start while another Vivado is running, and `open_gui.sh`
+checks the project against `rtl/` before opening it.
 
 Note: plain `cd` misbehaves in this user's zsh. Use `env -C <dir> <cmd>` from
 tool calls.
