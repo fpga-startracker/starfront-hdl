@@ -17,7 +17,7 @@ of PL logic.
 | M1 | 50 MHz → 25 MHz pixel + 125 MHz serial, DVI out over HDMI | **passed on hardware** |
 | M2 | SCCB master with **read**, camera ID probe, on-screen status | **passed on hardware** |
 | M3 | 94-register camera init + pixel stream geometry probe | **passed on hardware** |
-| M4 | 320×240 RGB565 frame buffer → live image on HDMI | **passed on hardware** |
+| M4 | 320×240 RGB565 / grayscale frame buffer → live image on HDMI | **passed on hardware** |
 | M5 | Streaming star detection at the camera's full 640×480 | **passed on hardware** |
 | M6 | Sub-pixel centroid, multiple markers, astro register profile | not started |
 
@@ -63,7 +63,10 @@ done
 ```
 
 On the board: KEY1 resets, KEY2 held shows the status numbers over a live
-image, KEY3 toggles the sensor's colour bar test pattern.
+image, KEY3 toggles the sensor between RGB565 and YUV422 grayscale output.
+The grayscale mode is the astro-friendly option: it keeps only luminance and is
+used when the detector wants one 8-bit brightness sample per pixel instead of a
+full 16-bit colour word.
 
 Then follow [`docs/bringup_checklist.md`](docs/bringup_checklist.md) on the
 board, and wire the camera per

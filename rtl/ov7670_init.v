@@ -31,6 +31,7 @@ module ov7670_init
     // the test pattern and the window position can be tuned on the bench rather
     // than costing a rebuild each time.
     input  wire        color_bar,
+    input  wire        gray_mode,
     input  wire [1:0]  hstart_sel,
 
     // Status
@@ -89,17 +90,19 @@ module ov7670_init
     ov7670_registers u_regs (
         .index      ( reg_index  ),
         .color_bar  ( color_bar  ),
+        .gray_mode  ( gray_mode  ),
         .hstart_sel ( hstart_sel ),
         .data       ( rom_data   )
     );
 
     //------------------------------------------------------------------------
-    // Latch a change of color_bar until the sequencer is idle enough to act on
-    // it - the change is a single cycle and the FSM is usually mid-transaction.
+    // Latch a change of the runtime camera configuration until the sequencer is
+    // idle enough to act on it - the change is a single cycle and the FSM is
+    // usually mid-transaction.
     //------------------------------------------------------------------------
-    wire [2:0] cfg = {hstart_sel, color_bar};
+    wire [3:0] cfg = {gray_mode, hstart_sel, color_bar};
 
-    reg [2:0] cfg_d     = 3'd0;
+    reg [3:0] cfg_d     = 4'd0;
     reg       cfg_dirty = 1'b0;
     wire cfg_changed = (cfg != cfg_d);
 

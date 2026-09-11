@@ -29,7 +29,7 @@
 //   Controls:
 //     KEY1  reset
 //     KEY2  hold to force the status overlay while a live image is showing
-//     KEY3  toggle the sensor's built-in 8-bar colour test pattern
+//     KEY3  toggle the camera between RGB565 and YUV422 grayscale output
 //     KEY4  step the horizontal window position, 0-3, shown on the overlay.
 //           Use it if the picture has a band of junk down one edge: that is
 //           the sensor's window sitting over its dummy columns, and no amount
@@ -128,6 +128,7 @@ module top_starfront #(
         .clk ( clk_pix ), .key_raw ( ~key_n[3] ), .key_stable ( key4_pressed )
     );
 
+    // KEY3 toggles the camera output mode between RGB565 and YUV422 grayscale.
     // KEY4 steps through the four window positions on each press.
     // Position 1 is the default because it is the one that came out clean on
     // this board - position 0, inherited from the Basys 3 project, put the
@@ -136,14 +137,23 @@ module top_starfront #(
     localparam [1:0] HSTART_DEFAULT = 2'd1;
 
     reg [1:0] hstart_sel = HSTART_DEFAULT;
+    reg       gray_mode  = 1'b0;
+    reg       key3_prev  = 1'b0;
     reg       key4_prev  = 1'b0;
 
     always @(posedge clk_pix) begin
         if (rst_pix) begin
             hstart_sel <= HSTART_DEFAULT;
+            gray_mode  <= 1'b0;
+            key3_prev  <= 1'b0;
             key4_prev  <= 1'b0;
         end else begin
+            key3_prev <= key3_pressed;
             key4_prev <= key4_pressed;
+
+            if (key3_pressed && !key3_prev)
+                gray_mode <= ~gray_mode;
+
             if (key4_pressed && !key4_prev)
                 hstart_sel <= hstart_sel + 2'd1;
         end
@@ -263,7 +273,8 @@ module top_starfront #(
     ov7670_init #(.CLK_FREQ(PIX_FREQ)) u_ov7670_init (
         .clk           ( clk_pix       ),
         .rst           ( rst_pix | ~probe_locked ),   // held until the bus is ours
-        .color_bar     ( key3_pressed  ),
+        .color_bar     ( 1'b0          ),
+        .gray_mode     ( gray_mode     ),
         .hstart_sel    ( hstart_sel    ),
         .init_done     ( init_done     ),
         .sccb_start    ( init_start    ),
@@ -320,6 +331,7 @@ module top_starfront #(
             .href        ( ov7670_href     ),
             .vsync       ( ov7670_vsync    ),
             .data        ( ov7670_data     ),
+            .gray_mode   ( gray_mode       ),
             .pix_valid   ( pix_valid       ),
             .pix_x       ( pix_x           ),
             .pix_y       ( pix_y           ),
@@ -430,6 +442,7 @@ module top_starfront #(
         .ov7670_href  ( ov7670_href  ),
         .ov7670_vsync ( ov7670_vsync ),
         .ov7670_data  ( ov7670_data  ),
+        .gray_mode    ( gray_mode    ),
         .cap_wr_en    ( cap_wr_en    ),
         .cap_addr     ( cap_addr     ),
         .cap_data     ( cap_data     )

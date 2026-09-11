@@ -25,8 +25,12 @@ hold KEY2 and read row 1, which should say `0500 01E0`.
 ## What the board shows you
 
 **Keys:** KEY1 reset · KEY2 hold to force the status overlay over a live image ·
-KEY3 toggle the sensor's 8-bar colour test pattern · KEY4 step the horizontal
-window position (see pitfall 9 in `docs/ov7670_notes.md`).
+KEY3 toggle the sensor between RGB565 and YUV422 grayscale output · KEY4 step
+the horizontal window position (see pitfall 9 in `docs/ov7670_notes.md`).
+
+The colour-bar pattern remains available in the register ROM for bench debugging,
+but the default bring-up flow leaves it off so the board shows the actual camera
+output in the active format.
 
 **LEDs (active low — lit means the signal is high):**
 
@@ -215,16 +219,18 @@ Capture goes into a 320×240 × 12-bit inferred block RAM and is pixel-doubled
 back to 640×480 for display. The overlay hands over to the live image
 automatically once `init_done` goes high.
 
-1. **Colour bars first.** Press KEY3 to switch the sensor to its 8-bar test
-   pattern. That re-runs the whole register table, so the screen goes back to
-   the overlay for about a tenth of a second and then shows the bars.
-   Stable, correctly ordered bars mean capture, block RAM and display are all
-   correct, and any remaining problem is in the sensor's ISP configuration.
-2. **Then press KEY3 again** for the live image.
+1. **Toggle the image format.** Press KEY3 to switch between the normal RGB565
+   image and the YUV422 grayscale mode. The register table re-runs, so the
+   screen drops back to the overlay for a short moment and then resumes with the
+   new format.
+2. **Confirm the image is stable in both modes.** The same FPGA path handles
+   both, so a stable picture in either mode means the capture, block RAM and
+   display pipeline are correct.
 
-**Pass:** a live colour image. That completes camera bring-up.
+**Pass:** a live image in either RGB565 or YUV422 grayscale. That completes
+camera bring-up.
 
-If the bars are right but the live image has wrong colours, work through
-pitfalls 2, 5 and 7 in `docs/ov7670_notes.md` — that is the ISP configuration,
-not the FPGA. If the bars themselves are wrong, the problem is in the capture
-path or the data bus wiring.
+If the image is wrong only in RGB565, work through pitfalls 2, 5 and 7 in
+`docs/ov7670_notes.md` — that is the ISP configuration, not the FPGA. If the
+image is wrong in both formats, the problem is in the capture path or the data
+bus wiring.

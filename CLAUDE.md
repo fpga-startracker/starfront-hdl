@@ -71,7 +71,8 @@ top_starfront   (parameter ENABLE_STARS)
 ├── clk_wiz_0         MMCM: 50 MHz -> 125 MHz (clk_ser) + 25 MHz (clk_pix)
 ├── sccb_master       SCCB with read; exposes _out/_oe/_in, IOBUF is in the top
 ├── sccb_probe        reset, read PID/VER, write+read-back, retry ~2 Hz
-├── ov7670_init       94-register table; color_bar is an input, so KEY3 re-runs
+├── ov7670_init       94-register table; KEY3 toggles gray_mode for RGB565 vs
+│   grayscale YUV422 output
 │   └── ov7670_registers
 ├── cam_activity      coarse PCLK/HREF/VSYNC/data activity
 ├── cam_stream_probe  bytes/line, lines/frame, PCLK frequency, frames/sec
@@ -83,7 +84,7 @@ top_starfront   (parameter ENABLE_STARS)
 │   └── line_buffer   x4, distributed RAM - no block RAM at all
 ├── vga_sync_gen      640x480 @ 60 Hz timing, both sync polarities
 ├── status_overlay    hex digits via hex_font, plus a flag row of blocks
-├── key_debounce      x2  KEY2 (overlay) and KEY3 (colour bars)
+├── key_debounce      x2  KEY2 (overlay) and KEY3 (grayscale toggle)
 └── dvi_tx
     ├── tmds_encoder   x3   DVI 1.0 8b/10b
     └── oserdes_10to1  x4   OSERDESE2 master/slave pair per lane
