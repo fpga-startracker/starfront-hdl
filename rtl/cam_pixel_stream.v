@@ -27,6 +27,7 @@ module cam_pixel_stream (
     input  wire        href,
     input  wire        vsync,
     input  wire [7:0]  data,
+    input  wire        gray_mode,
 
     output reg         pix_valid,    // one cycle per source pixel
     output reg  [9:0]  pix_x,        // 0..639
@@ -87,8 +88,8 @@ module cam_pixel_stream (
                     pix_valid <= 1'b1;
                     pix_x     <= pending_x;
                     pix_y     <= pending_y;
-                    pix_rgb   <= {byte1_reg, byte2_reg};
-                    pix_luma  <= luma_sum[9:2];
+                    pix_rgb   <= gray_mode ? {byte1_reg[7:3], byte1_reg[7:2], byte1_reg[7:3]} : {byte1_reg, byte2_reg};
+                    pix_luma  <= gray_mode ? byte1_reg : luma_sum[9:2];
                 end
                 pixel_rdy <= 1'b0;
             end else begin

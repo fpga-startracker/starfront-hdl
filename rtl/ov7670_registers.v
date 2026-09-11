@@ -34,6 +34,7 @@
 module ov7670_registers (
     input  wire [7:0]  index,
     input  wire        color_bar,    // 1 = 8-bar test pattern instead of the image
+    input  wire        gray_mode,    // 1 = YUV422 grayscale mode, 0 = RGB565 mode
     input  wire [1:0]  hstart_sel,   // horizontal window position, see below
     output reg  [15:0] data
 );
@@ -83,11 +84,11 @@ module ov7670_registers (
         8'd0:  data = 16'h12_80;  // COM7: Reset all registers
 
         //==============================================================
-        // OUTPUT FORMAT — RGB444
+        // OUTPUT FORMAT — RGB565 or YUV422 grayscale
         //==============================================================
-        8'd1:  data = 16'h12_04;  // COM7: RGB output
-        8'd2:  data = 16'h40_D0;  // COM15: full 00-FF range, bits[5:4]=01 = RGB565
-        8'd3:  data = 16'h8C_00;  // RGB444 off, so COM15[5:4] = 01 selects RGB565
+        8'd1:  data = gray_mode ? 16'h12_00 : 16'h12_04;  // COM7: YUV422 grayscale or RGB output
+        8'd2:  data = gray_mode ? 16'h40_00 : 16'h40_D0;  // COM15: default YUV path or RGB565
+        8'd3:  data = 16'h8C_00;  // RGB444 off; harmless in either mode
         8'd4:  data = 16'h04_00;  // COM1: No CCIR656
 
         //==============================================================

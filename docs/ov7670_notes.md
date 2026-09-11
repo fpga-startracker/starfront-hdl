@@ -4,6 +4,25 @@ Carried over from the Basys 3 OV7670→VGA project, which reached a working live
 colour image. Everything in the "pitfalls" section below was paid for in days
 of debugging there; none of it is obvious from the datasheet.
 
+## Runtime grayscale mode is built in
+
+The design has a runtime `gray_mode` select and the top level exposes it on
+`KEY3`. In the default state the sensor is configured for RGB565, which matches
+the 320×240 frame buffer and the live colour image. When `gray_mode` is asserted
+it reconfigures the OV7670 for YUV422 grayscale output (`COM7 = 0x00`,
+`COM15 = 0x00`), and the FPGA keeps only the luminance byte for each pixel.
+
+That is the working mode for the astro path: the detector wants one 8-bit
+brightness sample per source pixel, not a 16-bit colour word. The design maps
+that Y byte back into the existing framebuffer path so the same live image
+pipeline still works, while the star engine consumes the full-resolution
+luminance stream directly from `cam_pixel_stream`.
+
+The colour-bar test pattern is still in the register ROM and is useful for
+bench debugging, but it is not the default bring-up mode in this build. The
+project now treats grayscale as the normal scientific mode and RGB565 as the
+reference display mode.
+
 ## Pitfalls that cost real time on the previous board
 
 ### 1. Never read the data bus combinationally while writing the frame buffer
