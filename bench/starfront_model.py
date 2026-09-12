@@ -140,6 +140,32 @@ class Params:
     # window, and then the blob is the better shape.
     cg_half: int = 0        # 0 = the grown region
 
+    # What is subtracted from each weighted pixel.
+    #   0  a global linear follower (bg_lin) - one number for the whole frame.
+    #      This is what the RTL did until 2026-09-12; kept so the old figures
+    #      can be reproduced, the hardware no longer implements it.
+    #   1  the per-column code background at the seed's column, through the
+    #      linearising table. What the RTL does.
+    #   2  the same, with the follower's fractional bits interpolated between
+    #      two table entries. Measured: 0.002 px better than 1, not built.
+    #
+    # The dataset's blob truth subtracts the *local* 21x21 median, linearised.
+    # A DUST frame is vignetted from code 84 on one side of the disc to 58 on
+    # the other, which in linear light is a factor of two; a global number is
+    # right in the middle and wrong by up to a hundred counts at either edge,
+    # where a wing pixel's true excess over the sky is thirty or forty. The
+    # per-column follower already tracks that median to within half a code, so
+    # linearising it is one more table lookup and no new state. Median error
+    # 0.482 -> 0.401 display px over the 381-frame sample; see
+    # docs/centroiding.md section 3.
+    cg_bg: int = 1
+
+    # Deviation follower: 0 one global MAD, 1 one per column like the
+    # background. Measured and rejected: the median error does not move and
+    # completeness drops four points, because a per-column follower sees 256
+    # samples a frame instead of 65536 and settles high. Not in the RTL.
+    mad_col: int = 0
+
     # Quality gate applied to the grown region.
     min_npx: int = 4        # a real star fills at least this many binned pixels
     min_sum: int = 256      # and carries at least this much light
@@ -195,6 +221,7 @@ class TrackerState:
     can start from."""
     bg_col: np.ndarray | None = None    # per-column accumulator, code domain
     mad: int = 0                        # global accumulator, code domain
+    mad_col: np.ndarray | None = None   # per-column accumulator, if mad_col
     bg_lin: int = 0                     # global accumulator, linear domain
     primed: bool = False
 
@@ -213,10 +240,11 @@ def fov_mask(p: Params, h: int = IMG_H, w: int = IMG_W) -> np.ndarray:
 
 
 def run_trackers(code: np.ndarray, lin: np.ndarray, p: Params,
-                 st: TrackerState) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                 st: TrackerState
+                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """One raster pass of the background followers.
 
-    Returns three images holding, for each pixel, the state each follower was
+    Returns four images holding, for each pixel, the state each follower was
     left in after that pixel was consumed - which is exactly what the hardware
     register or RAM word contains at that moment:
 
@@ -225,6 +253,8 @@ def run_trackers(code: np.ndarray, lin: np.ndarray, p: Params,
                 accumulator with `bg_frac` fractional bits - the deviation is
                 between one and two codes and rounding it to an integer there
                 throws away a third of the threshold
+      lin_post  global linear background follower
+      acc_post  the per-column accumulator itself, `bg_frac` fractional bits
 
     All three are sign-LMS median followers: step up or down by a fixed amount
     depending on which side of the estimate the sample fell. They converge to a
@@ -269,10 +299,13 @@ def run_trackers(code: np.ndarray, lin: np.ndarray, p: Params,
         # default step, and the linear follower starts within a few counts.
         st.bg_col = np.full(w, p.prime_bg << sh, dtype=np.int64)
         st.mad = p.prime_mad << sh
+        st.mad_col = np.full(w, p.prime_mad << sh, dtype=np.int64)
         st.bg_lin = p.prime_lin << sh_l
         st.primed = True
 
     bg_col = st.bg_col
+    mad_col = st.mad_col
+    per_col_mad = bool(p.mad_col)
     mad, bg_lin = st.mad, st.bg_lin
     step, step_m, step_l = p.step_bg, p.step_mad, p.step_lin
     mad_min = 1 << sh
@@ -288,6 +321,7 @@ def run_trackers(code: np.ndarray, lin: np.ndarray, p: Params,
     gate = fov_mask(p, h, w).reshape(-1)
 
     bg_post = np.empty(h * w, dtype=np.int32)
+    acc_post = np.empty(h * w, dtype=np.int32)
     mad_post = np.empty(h * w, dtype=np.int32)
     lin_post = np.empty(h * w, dtype=np.int32)
 
@@ -297,6 +331,8 @@ def run_trackers(code: np.ndarray, lin: np.ndarray, p: Params,
             c = int(flat_c[i])
             acc = int(bg_col[x])
             b = acc >> sh
+            if per_col_mad:
+                mad = int(mad_col[x])
             m = mad >> sh
             d = c - b if c > b else b - c
 
@@ -306,18 +342,24 @@ def run_trackers(code: np.ndarray, lin: np.ndarray, p: Params,
                 mad += step_m if d > m else -step_m
                 if mad < mad_min:
                     mad = mad_min
+                if per_col_mad:
+                    mad_col[x] = mad
 
             v = int(flat_l[i])
             bg_lin += step_l if v > (bg_lin >> sh_l) else -step_l
 
             bg_post[i] = acc >> sh
+            acc_post[i] = acc
             mad_post[i] = mad
             lin_post[i] = bg_lin >> sh_l
             i += 1
 
-    st.mad, st.bg_lin = mad, bg_lin
+    st.bg_lin = bg_lin
+    if not per_col_mad:
+        st.mad = mad
 
-    return (bg_post.reshape(h, w), mad_post.reshape(h, w), lin_post.reshape(h, w))
+    return (bg_post.reshape(h, w), mad_post.reshape(h, w), lin_post.reshape(h, w),
+            acc_post.reshape(h, w))
 
 
 def thresholds(bg: np.ndarray, mad_acc: np.ndarray, p: Params
@@ -340,6 +382,24 @@ def thresholds(bg: np.ndarray, mad_acc: np.ndarray, p: Params
     ms = np.maximum((p.k_seed_q * sig) >> shift, p.floor_code)
     mg = np.maximum((p.k_grow_q * sig) >> shift, p.floor_code)
     return (bg + ms).astype(np.int32), (bg + mg).astype(np.int32)
+
+
+def lin_of_bg_acc(acc: int, frac_bits: int, interp: bool) -> int:
+    """Linear light for a code-domain background accumulator.
+
+    Integer part through the table; with `interp` the fractional bits pick a
+    point on the chord to the next entry. The chord slope is the table's local
+    difference, at most 79 counts at the top of the range, so in hardware this
+    is a 7 x 6 bit product and a shift - the model is that same arithmetic.
+    """
+    b = acc >> frac_bits
+    if b >= 255:
+        return int(LUT[255])
+    lo = int(LUT[b])
+    if not interp:
+        return lo
+    f = acc & ((1 << frac_bits) - 1)
+    return lo + (((int(LUT[b + 1]) - lo) * f) >> frac_bits)
 
 
 # ---------------------------------------------------------------------------
@@ -467,11 +527,12 @@ def detect(code: np.ndarray, p: Params = DEFAULT,
         st = TrackerState()
 
     lin = LUT[code]
-    bg_post, mad_post, lin_post = run_trackers(code, lin, p, st)
+    bg_post, mad_post, lin_post, acc_post = run_trackers(code, lin, p, st)
 
     # Tracker state as of the moment each window closes.
     bg_at = _at_window(bg_post, HALF, 0)
-    mad_at = _at_window(mad_post, HALF, HALF)
+    acc_at = _at_window(acc_post, HALF, 0)
+    mad_at = _at_window(mad_post, HALF, 0 if p.mad_col else HALF)
     bglin_at = _at_window(lin_post, HALF, HALF)
 
     thr_seed, thr_grow = thresholds(bg_at, mad_at, p)
@@ -501,7 +562,10 @@ def detect(code: np.ndarray, p: Params = DEFAULT,
         weight_mask = region if p.cg_half <= 0 else (
             (np.abs(gx - HALF) <= p.cg_half) & (np.abs(gy - HALF) <= p.cg_half))
 
-        bl = int(bglin_at[cy, cx])
+        if p.cg_bg == 0:
+            bl = int(bglin_at[cy, cx])
+        else:
+            bl = lin_of_bg_acc(int(acc_at[cy, cx]), p.bg_frac, p.cg_bg == 2)
         q = np.where(weight_mask, np.maximum(wl - bl, 0), 0).astype(np.int64)
 
         sum_i = int(q.sum())

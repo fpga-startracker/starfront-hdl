@@ -17,7 +17,8 @@ Section numbers below are theirs.
    │
    ├─ bin_nxn        4x4 mean                          paper 4.1
    ├─ pix_lut        8-bit code -> 12-bit linear light
-   ├─ bg_track       per-column median, global MAD, two thresholds
+   ├─ bg_track       per-column median, global MAD, two thresholds, and the
+   │                 same median linearised for the weights
    ├─ 8 line buffers 9x9 region of interest in registers
    ├─ seed test      local maximum, above threshold, inside the field of view
    ├─ region_grow    8-connected component of the RoI                paper 4.2
@@ -107,6 +108,23 @@ Threshold: `background + k * 1.4826 * MAD`, with k = 5 sigma to start a cluster
 and 3 sigma to grow one. The grow level matches the cut the dataset's own boxes
 use, so the pixel sets are directly comparable.
 
+**The weights are measured against the same local median, linearised.** The
+centre of gravity subtracts a background from every pixel it weights, and
+until 2026-09-12 that background was a separate global follower - one number
+for the whole frame. That was the largest single error in the pipeline. The
+vignetting that is a 26-code spread in code space is a factor of two in
+linear light, so a frame-wide value sat about a hundred counts wrong at either
+side of the disc, where a wing pixel's real excess over the sky is thirty or
+forty: on the bright side the wings were over-weighted, on the dark side they
+were clipped to zero and faint stars failed the flux gate altogether. The
+dataset's own blob truth subtracts the local 21x21 median converted to linear
+light (`display_encode.py`, `blob_centroid`), and the per-column follower
+already tracks that median to within half a code, so the fix is to put the
+centre column's median through the same 256-entry table the pixels go through.
+Median error 0.482 -> 0.401 display px, completeness 65.4% -> 68.8%, no new
+state. Interpolating the follower's fractional bits between two table entries
+was measured as well and is worth 0.002 px, which does not buy a multiplier.
+
 ---
 
 ## 4. Accuracy
@@ -146,29 +164,32 @@ with.
 
 | | display px | DUST px |
 | --- | --- | --- |
-| median | 0.482 | 0.120 |
-| mean | 0.707 | 0.177 |
-| p95 | 2.15 | 0.54 |
+| median | 0.401 | 0.100 |
+| mean | 0.635 | 0.159 |
+| p95 | 2.17 | 0.54 |
 | systematic offset | dx +0.07, dy -0.01 | |
+
+(Before the linearised column background of 2026-09-12 the median was 0.482
+and the mean 0.707 on the same frames.)
 
 Completeness, by the star's peak signal in sensor DN:
 
 | peak DN | truth stars | found | |
 | --- | --- | --- | --- |
-| 0-50 | 3219 | 1333 | 41% |
-| 50-80 | 2808 | 2126 | 76% |
-| 80-150 | 1561 | 1319 | 85% |
+| 0-50 | 3219 | 1593 | 49% |
+| 50-80 | 2808 | 2167 | 77% |
+| 80-150 | 1561 | 1321 | 85% |
 | 150-400 | 1125 | 855 | 76% |
 | 400+ | 288 | 258 | **90%** |
 
 **The denominator here is not every catalogued star.** It is the 80.4% of them
 that got a blob at all and survived the dataset's own advised filters
 (`box_truncated == 0`, `box_fill >= 0.3`). Against every catalogued star in
-these frames the figure is 65.4% x 0.804 = **52.6%**. Both numbers are true and
-they answer different questions; the 65% is the fair one for a detector, since
+these frames the figure is 68.8% x 0.804 = **55.3%**. Both numbers are true and
+they answer different questions; the 69% is the fair one for a detector, since
 the excluded rows are stars the dataset itself could not segment.
 
-Unmatched detections run at about 19 a frame against 24 catalogued stars - more
+Unmatched detections run at about 22 a frame against 24 catalogued stars - more
 than half of everything reported. Some are real sources the astrometric solution
 did not catalogue and some are noise; the dataset gives no way to tell them
 apart, so they are reported rather than tuned away. A star identification stage
@@ -178,7 +199,11 @@ downstream has to be able to live with that ratio.
 
 `bench/score_hardware.py`, over 20 frames streamed to the hardware over JTAG and
 the star lists read back, against exactly the same truth and with exactly the
-same matching rule the model is scored with:
+same matching rule the model is scored with. **These figures are from
+2026-09-09, with the global linear background**; the linearised column
+background has passed the bit-exact simulation against the model on a real
+frame but has not yet been re-scored on the board, so the model's 0.401 is the
+current claim and the row below is the last hardware measurement.
 
 | | board | model, same 20 frames |
 | --- | --- | --- |
@@ -214,9 +239,11 @@ median of **0.197** display pixels, with the remainder being the 9x9 window
 against the dataset's reach-15 blob.
 
 So: **0.008 px is what the arithmetic does, 0.20 px is what the algorithm does
-given a perfect threshold, and 0.48 px is what the whole thing does having had
+given a perfect threshold, and 0.40 px is what the whole thing does having had
 to estimate the threshold itself.** The last number is the honest one for a
-detector, and the middle one says where the remaining error lives.
+detector, and the middle one says where the remaining error lives. It was
+0.48 until the weights were measured against the local background rather than
+a global one - that gap was not the threshold at all, and it is closed.
 
 ### What these numbers do not say
 
@@ -252,7 +279,9 @@ detector, and the middle one says where the remaining error lives.
 | Linearise the input? | yes | a plain ramp instead moves the median from 0.479 to 0.931 px |
 | Track background per column? | yes | per-raster gives a threshold 30 codes up where truth says 9 |
 | Fractional bits | 8 | 4 (the paper's) is 0.0625 binned px = 0.25 display px, coarser than the answer |
-| Seed / grow thresholds | 5 sigma / 3 sigma | swept; 3 sigma grow matches the truth's own cut and minimises error |
+| Seed / grow thresholds | 5 sigma / 3 sigma | swept; 3 sigma grow matches the truth's own cut and minimises error. Re-swept after the background change: 2.5 sigma 0.468, 3 sigma 0.401, 3.5 sigma 0.426, and the sign of the x offset flips across it (-0.11, +0.07, +0.25) as the smear tail is let in or cut off |
+| Background under the weights | the column median, linearised | the global linear follower scored 0.482; the centre column's median through the table 0.401; the same with the accumulator's fractional bits interpolated 0.399 |
+| MAD per column, like the background? | no, keep it global | median unchanged (0.398) but completeness fell 68.8% -> 64.9% and the x offset grew +0.07 -> +0.17: a per-column deviation sees 256 samples a frame instead of 65536 and settles high |
 | Columns per accumulate cycle | 2 | two stars can be five columns apart, and a slower engine drops one of them |
 | Warm-up frames after reset | 4 | completeness climbs 62% -> 70% from two frames to four, then stops |
 | Zero the scroll before a scored run | yes | an offset that is not a multiple of four resamples the binned image; at -19 the board's median error went 0.477 -> 0.599 |
@@ -296,12 +325,17 @@ path, the DVI transmitter and the ILA. 7z010: 17 600 LUT, 35 200 FF, 60 BRAM36,
 | block RAM | 37.5 | 62 |
 | DSP | 2 | 2.5 |
 
-WNS +3.617 ns on the 25 MHz pixel clock, all constraints met, zero failing
-endpoints - but that is 36.5 ns of a 40 ns period, so **Fmax is about 27 MHz and
-the margin is 10%**, where `bringup` has 25.1 ns of slack on the same clock. The
-long paths are the combinational ones the detector deliberately buys cycles
-with: the eighty-comparator peak test and `region_grow`'s four dilation rounds.
-It passes, and there is not much room to add to it without pipelining those.
+WNS +1.725 ns on the 25 MHz pixel clock, all constraints met, zero failing
+endpoints - but that is 38.3 ns of a 40 ns period, so **Fmax is about 26 MHz and
+the margin is 4%**, where `bringup` has 12.6 ns of slack on the same clock. (It
+was +3.6 ns before the linearised column background; the worst path did not
+change, the placement did.) That path runs from the scroll offset register
+through the field-of-view mask into the seed decision, and from there through
+the capture cycle's two-column accumulate into the divider's hold register -
+38 ns, of which 22 is routing. It is the chain the detector deliberately buys
+cycles with, alongside the eighty-comparator peak test and `region_grow`'s four
+dilation rounds. It passes, and there is no room to add anything on this clock
+without registering the seed decision first.
 
 The frame store dominates the block RAM: 32 of those 37.5 tiles, holding **two**
 256x256 buffers so a frame arriving over JTAG cannot tear the one on screen.
@@ -324,9 +358,18 @@ of them is more than a few kilobits and block RAM is what runs out on this part.
 
 ## 8. Where this goes next
 
-- **Threshold.** The measurement says this is where the remaining error is. A
-  local deviation estimate rather than a global one would be the first thing to
-  try; the per-column structure is already there.
+- **Threshold.** The measurement says this is where the remaining error is:
+  0.40 px with the estimated threshold against 0.20 with the truth's own. A
+  per-column deviation estimate has been tried and does not help (section 5).
+  What is left is the *level*, not the noise: the truth's median is local in
+  both axes (21x21 about the star) and the column follower is local in x only,
+  so airglow structure and the halos of neighbouring stars along a column are
+  what it cannot follow. A two-dimensional local estimate - the ring of the 9x9
+  window, which is already in registers - is the next thing to measure.
+- **Detection of faint stars.** Half the stars below 50 DN are missed. Seeding
+  on a 3x3 sum of the window rather than the single centre pixel raises the
+  detection SNR by about the square root of the pixel count; the window is
+  already there and the centroid can still be taken on the raw pixels.
 - **Fast Gaussian Fitting.** Section 4.5 of the paper, on a part with the DSPs
   for it. The measurement above says it would only pay once the threshold is
   fixed.

@@ -10,7 +10,8 @@
 //   (2024), section 3:
 //
 //     linearise      pix_lut, 8-bit code -> 12-bit light (see pix_lut.v)
-//     background     bg_track, per-column median and a global MAD
+//     background     bg_track, per-column median (also linearised for the
+//                    weights) and a global MAD
 //     window         eight line buffers -> a 9x9 RoI in registers
 //     seed           local maximum above the seed threshold, inside the FOV
 //     grow           region_grow, 8-connected component of the RoI, in one cycle
@@ -158,7 +159,6 @@ module star_centroid #(
         .in_x     ( in_x          ),
         .in_y     ( in_y          ),
         .in_code  ( in_code       ),
-        .in_lin   ( lin           ),
         .in_fov   ( pix_in_fov    ),
         .thr_seed ( thr_seed_code ),
         .thr_grow ( thr_grow_c    ),

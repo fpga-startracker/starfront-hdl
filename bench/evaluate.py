@@ -182,6 +182,12 @@ def main() -> int:
     ap.add_argument("--min-npx", type=int, default=None)
     ap.add_argument("--min-sum", type=int, default=None)
     ap.add_argument("--fov-r", type=int, default=None)
+    ap.add_argument("--cg-bg", type=int, default=None,
+                    help="background under the centroid weights: 0 global "
+                         "linear follower, 1 per-column median linearised, "
+                         "2 the same interpolated")
+    ap.add_argument("--mad-col", type=int, default=None,
+                    help="deviation follower: 0 global (default), 1 per column")
     ap.add_argument("--centroider", action="store_true",
                     help="score the centre-of-gravity arithmetic alone: place a "
                          "fixed window where the truth places its own (the "
@@ -196,7 +202,8 @@ def main() -> int:
     p = DEFAULT
     for name, val in (("k_seed_q", a.k_seed), ("k_grow_q", a.k_grow),
                       ("cg_half", a.cg_half), ("min_npx", a.min_npx),
-                      ("min_sum", a.min_sum), ("fov_r", a.fov_r)):
+                      ("min_sum", a.min_sum), ("fov_r", a.fov_r),
+                      ("cg_bg", a.cg_bg), ("mad_col", a.mad_col)):
         if val is not None:
             p = replace(p, **{name: val})
 
@@ -297,7 +304,9 @@ def main() -> int:
           f"cg {'blob' if p.cg_half <= 0 else f'{2 * p.cg_half + 1}x{2 * p.cg_half + 1}'}"
           f"   k_seed {p.k_seed_q / 4:.2f}s   k_grow {p.k_grow_q / 4:.2f}s")
     print(f"             min_npx {p.min_npx}   min_sum {p.min_sum}   "
-          f"fov_r {p.fov_r}   frac bits {8}   grow rounds {HALF}")
+          f"fov_r {p.fov_r}   frac bits {8}   grow rounds {HALF}   "
+          f"cg_bg {('global', 'column', 'column+interp')[p.cg_bg]}   "
+          f"mad {'column' if p.mad_col else 'global'}")
     print("=" * 78)
 
     if a.out:

@@ -298,21 +298,23 @@ the 4x4 binner turns that into quarter-binned-pixel motion. So the centroid
 readout has a predictable answer:
 
 1. KEY4 to hold, KEY3 off so it is not scrolling on its own.
-2. Note X. For the frame shipped in the bitstream it reads `89.6C`.
+2. Note X. For the frame shipped in the bitstream the model predicts `89.6F`
+   (it read `89.6C` on the board before the 2026-09-12 background change,
+   which moved this star by three LSB).
 3. Press KEY2 four times. **X must fall by exactly `0100`** - same fractional
-   digits, one lower in the integer part: `88.6C`.
+   digits, one lower in the integer part: `88.6F`.
 
 Four steps is a whole binned pixel and is exact for every star in the field
 (measured spread 0.002 px). The individual quarter-steps are not, and that is
 the interesting part - they go
 
 ```
-89.6C -> 89.24 -> 88.E4 -> 88.A4 -> 88.6C
-   -0.2812  -0.2500  -0.2500  -0.2188
+89.6F -> 89.28 -> 88.E7 -> 88.A5 -> 88.6F
+   -0.2773  -0.2539  -0.2578  -0.2109
 ```
 
 which is the **S-curve** of an undersampled centroider, the error the paper
-names in section 3.2. Its amplitude here is 0.031 binned pixels. Seeing that
+names in section 3.2. Its amplitude here is about 0.04 binned pixels. Seeing that
 sequence on the screen is a stronger statement than any single number: it says
 the pipeline is resolving a quarter of a pixel, and it says by how much
 undersampling bends the answer.

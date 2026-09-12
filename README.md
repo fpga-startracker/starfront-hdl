@@ -42,10 +42,10 @@ Measured against the **DUST** display set, 381 frames across 22 sessions,
 | | display px | DUST px |
 |---|---|---|
 | centre of gravity alone, vs `display_*` | **0.008** median | 0.002 |
-| whole detector, vs `display_blob_*` | **0.482** median, 2.15 p95 | 0.120 |
-| completeness, of stars the dataset itself segments | **65%** | |
+| whole detector, vs `display_blob_*` | **0.401** median, 2.17 p95 | 0.100 |
+| completeness, of stars the dataset itself segments | **69%** | |
 | completeness, peak ≥ 400 DN | **90%** | |
-| **measured on the board**, 20 frames | **0.477** median | 0.119 |
+| **measured on the board**, 20 frames, before the 2026-09-12 background change | **0.477** median | 0.119 |
 
 On the 7z010 that costs 40% of the LUTs, 16% of the flip-flops and 35 of the 60
 block RAMs — 32 of which are the stored frame, not the detector — and meets

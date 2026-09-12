@@ -38,10 +38,20 @@
 //   Everything here works on the 8-bit display code, not on linearised light.
 //   The encoding is close to logarithmic, which is what makes the noise about
 //   the same size across a frame spanning two decades of brightness, so a
-//   single median-plus-MAD rule holds everywhere. The linear background, which
-//   is what the centroid weights are measured against, is followed separately
-//   and very slowly - 1/1024 of a count per pixel, so it can move at most 64
-//   counts in a frame and where the raster happens to end cannot bias it.
+//   single median-plus-MAD rule holds everywhere.
+//
+//   **The linear background under the centroid weights is the same per-column
+//   median, put through the linearising table.** It used to be a separate
+//   global follower - one number for the whole frame - and that was measured
+//   to be the largest single error in the pipeline: the vignetting that is a
+//   26-code spread in code space is a factor of two in linear light, so a
+//   frame-wide value sat a hundred counts wrong at either side of the disc,
+//   where a wing pixel's real excess over the sky is thirty or forty. The
+//   dataset's own blob truth subtracts the local median, linearised; doing the
+//   same took the median centroid error from 0.482 to 0.401 display pixels and
+//   the completeness from 65% to 69%, for one more 256-entry table and no new
+//   state. Interpolating the follower's fractional bits between two table
+//   entries was tried too and bought 0.002 px, which is not worth a multiplier.
 //
 // Clock domain: single, the binned pixel stream's.
 //============================================================================
@@ -50,22 +60,19 @@ module bg_track #(
     parameter integer IMG_W       = 256,
     parameter integer HALF        = 4,    // detector window half-width
     parameter integer BG_FRAC     = 6,    // fractional bits, code-domain followers
-    parameter integer BG_LIN_FRAC = 10,   // fractional bits, linear follower
     parameter integer STEP_BG     = 8,
     parameter integer STEP_MAD    = 4,
-    parameter integer STEP_LIN    = 1,
     parameter integer K_SEED_Q    = 20,   // quarter sigma, starts a cluster
     parameter integer K_GROW_Q    = 12,   // quarter sigma, joins one
     parameter integer FLOOR_CODE  = 2,    // floor on (threshold - background)
 
     // Cold-start values. These are also the model's, in
-    // bench/starfront_model.py: Params.prime_bg / prime_mad / prime_lin. If they
-    // drift apart the two stop describing the same detector, because the
-    // followers are slow enough that where they started still shows several
-    // frames later.
+    // bench/starfront_model.py: Params.prime_bg / prime_mad. If they drift
+    // apart the two stop describing the same detector, because the followers
+    // are slow enough that where they started still shows several frames
+    // later.
     parameter integer PRIME_BG    = 64,
-    parameter integer PRIME_MAD   = 2,
-    parameter integer PRIME_LIN   = 230
+    parameter integer PRIME_MAD   = 2
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -74,14 +81,13 @@ module bg_track #(
     input  wire [7:0]  in_x,
     input  wire [7:0]  in_y,
     input  wire [7:0]  in_code,
-    input  wire [11:0] in_lin,
     input  wire        in_fov,        // this pixel is inside the illuminated disc
 
     // Registered one cycle after in_valid, and aligned by construction with a
     // detector window whose centre is HALF rows and HALF columns behind.
     output reg  [7:0]  thr_seed,      // code a pixel must clear to start a cluster
     output reg  [7:0]  thr_grow,      // code a pixel must clear to join one
-    output reg  [11:0] bg_lin,        // linear background under the weights
+    output reg  [11:0] bg_lin,        // that column's background, linearised
 
     // For the status panel and the ILA
     output wire [7:0]  bg_code,
@@ -89,7 +95,6 @@ module bg_track #(
 );
 
     localparam integer BGW = 8 + BG_FRAC;             // 14
-    localparam integer BLW = 12 + BG_LIN_FRAC;        // 22
     localparam [BGW-1:0] MAD_MIN = {{BGW{1'b0}}} + (1 << BG_FRAC);
 
     //------------------------------------------------------------------------
@@ -154,18 +159,12 @@ module bg_track #(
     end
 
     //------------------------------------------------------------------------
-    // Global linear background, followed slowly enough to be a frame statistic
+    // The centre column's background in linear light, for the centroid
+    // weights. Same column, same moment, same integer code the grow
+    // threshold is built on - the model reads all three from one place.
     //------------------------------------------------------------------------
-    reg [BLW-1:0] bl_r = {PRIME_LIN[11:0], {BG_LIN_FRAC{1'b0}}};
-
-    wire [11:0]    bl_i    = bl_r[BLW-1:BG_LIN_FRAC];
-    wire [BLW-1:0] bl_next = (in_lin > bl_i) ? (bl_r + STEP_LIN[BLW-1:0])
-                                             : (bl_r - STEP_LIN[BLW-1:0]);
-
-    always @(posedge clk) begin
-        if (rst)           bl_r <= {PRIME_LIN[11:0], {BG_LIN_FRAC{1'b0}}};
-        else if (in_valid) bl_r <= bl_next;
-    end
+    wire [11:0] bg_b_lin;
+    pix_lut u_lut_bg (.code(bg_b[BGW-1:BG_FRAC]), .lin(bg_b_lin));
 
     //------------------------------------------------------------------------
     // Thresholds. sigma = 1.4826 * MAD, and 1.4826 is 1519/1024 to a part in
@@ -196,11 +195,11 @@ module bg_track #(
         if (rst) begin
             thr_seed <= 8'hFF;
             thr_grow <= 8'hFF;
-            bg_lin   <= PRIME_LIN[11:0];
+            bg_lin   <= 12'd0;
         end else if (in_valid) begin
             thr_seed <= (tseed > 14'd255) ? 8'd255 : tseed[7:0];
             thr_grow <= (tgrow > 14'd255) ? 8'd255 : tgrow[7:0];
-            bg_lin   <= bl_next[BLW-1:BG_LIN_FRAC];
+            bg_lin   <= bg_b_lin;
         end
     end
 
