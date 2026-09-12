@@ -8,13 +8,12 @@
 //              reads at clk_pix, and the block RAM itself handles the crossing.
 //              The XDC declares the two clocks asynchronous for that reason.
 //
-//   320 x 240 x 16 bit = 1,228,800 bits, which Vivado maps to 48 of the 7z010's
-//   60 RAMB36 tiles. The original 12-bit RGB444 buffer took 36, so the move to
-//   RGB565 cost twelve tiles - the tool does not pack 16 bits into an 18-bit
-//   slice the way the raw arithmetic suggests it could.
-//
-//   With the ILA also present that leaves very little spare, so the grayscale
-//   path planned for the star tracker should drop this to 8 bits per pixel.
+//   320 x 240 x 8 bit = 614,400 bits. The RGB565 version of this buffer was
+//   1,228,800 bits and Vivado mapped it to 48 of the 7z010's 60 RAMB36 tiles -
+//   it builds a memory this deep out of 32K x 1 primitives, three per data
+//   bit, so the tile count is simply three times the width. Eight bits is
+//   24 tiles, which is what made room for the second frame buffer the tearing
+//   note in docs/ov7670_notes.md asks for, and for anything M7 needs.
 //
 //   Unlike the Basys 3 version this is inferred rather than a Block Memory
 //   Generator instance: it needs no IP generation step, simulates directly, and
@@ -24,7 +23,7 @@
 
 module fb_mem #(
     parameter integer ADDR_W = 17,
-    parameter integer DATA_W = 16,
+    parameter integer DATA_W = 8,
     parameter integer DEPTH  = 76800
 ) (
     // Write port - camera domain

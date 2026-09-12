@@ -22,18 +22,27 @@
 //     M2  SCCB master with read, camera ID probe
 //     M3  94-register camera init, and a probe that measures what the sensor
 //         is really emitting (bytes per line, lines per frame, PCLK, fps)
-//     M4  320x240 RGB565 frame buffer, pixel-doubled back to 640x480
+//     M4  320x240 8-bit luminance frame buffer, pixel-doubled back to 640x480.
+//         The sensor runs in YUV422 and only Y is kept: the picture is gray,
+//         the buffer is half what RGB565 cost, and the star path gets the
+//         sensor's own luminance instead of one approximated from colour.
 //     M5  streaming star detection at the camera's full 640x480, with no frame
 //         buffer at all - see star_detect.v for why that is the right shape
 //
 //   Controls:
 //     KEY1  reset
 //     KEY2  hold to force the status overlay while a live image is showing
-//     KEY3  toggle the sensor's built-in 8-bar colour test pattern
+//     KEY3  toggle the sensor's built-in 8-bar test pattern - a descending
+//           gray staircase in Y, white on the left to black on the right
 //     KEY4  step the horizontal window position, 0-3, shown on the overlay.
 //           Use it if the picture has a band of junk down one edge: that is
 //           the sensor's window sitting over its dummy columns, and no amount
 //           of FPGA-side work can recover it.
+//     KEY2 + KEY4  (KEY4 pressed while KEY2 is held) swap which byte of each
+//           YUV422 pair is taken as Y. The overlay's window digit reads 4
+//           higher while swapped. Use it if the picture is a fine vertical
+//           comb or the test bars are bright and dark in the wrong order:
+//           that is the chroma byte being displayed instead of the luma.
 //
 //   LEDs (active low on this board, so lit means the signal is high):
 //     LED1  heartbeat        LED2  camera ID ok
@@ -133,19 +142,32 @@ module top_starfront #(
     // this board - position 0, inherited from the Basys 3 project, put the
     // sensor's dummy columns inside the captured window and produced a band of
     // junk down the right edge.
+    //
+    // With KEY2 held, KEY4 instead toggles y_second: which byte of each YUV422
+    // pair the capture logic takes as luminance. The register table asks the
+    // sensor for Y first, but the sensor's own default is Y second and the two
+    // are one bit apart in TSLB, so the choice is made reversible on the bench
+    // rather than being trusted to a datasheet reading.
     localparam [1:0] HSTART_DEFAULT = 2'd1;
+    localparam       Y_SECOND_DEFAULT = 1'b0;
 
     reg [1:0] hstart_sel = HSTART_DEFAULT;
+    reg       y_second   = Y_SECOND_DEFAULT;
     reg       key4_prev  = 1'b0;
 
     always @(posedge clk_pix) begin
         if (rst_pix) begin
             hstart_sel <= HSTART_DEFAULT;
+            y_second   <= Y_SECOND_DEFAULT;
             key4_prev  <= 1'b0;
         end else begin
             key4_prev <= key4_pressed;
-            if (key4_pressed && !key4_prev)
-                hstart_sel <= hstart_sel + 2'd1;
+            if (key4_pressed && !key4_prev) begin
+                if (key2_pressed)
+                    y_second   <= ~y_second;
+                else
+                    hstart_sel <= hstart_sel + 2'd1;
+            end
         end
     end
 
@@ -283,6 +305,11 @@ module top_starfront #(
     BUFG u_pclk_bufg (.I(ov7670_pclk), .O(cam_pclk));
 `endif
 
+    // The byte select is a quasi-static control bit from the pixel domain;
+    // one synchroniser takes it into the camera domain for both consumers.
+    wire y_second_p;
+    cdc_sync #(.WIDTH(1)) u_sy_ysel (.clk(cam_pclk), .din(y_second), .dout(y_second_p));
+
     wire pclk_alive, href_alive, vsync_alive, data_alive;
 
     cam_activity #(.CLK_FREQ(PIX_FREQ)) u_cam_activity (
@@ -311,7 +338,6 @@ module top_starfront #(
 
         wire        pix_valid;
         wire [9:0]  pix_x, pix_y;
-        wire [15:0] pix_rgb;
         wire [7:0]  pix_luma;
         wire        cam_frame_start;
 
@@ -320,10 +346,10 @@ module top_starfront #(
             .href        ( ov7670_href     ),
             .vsync       ( ov7670_vsync    ),
             .data        ( ov7670_data     ),
+            .y_second    ( y_second_p      ),
             .pix_valid   ( pix_valid       ),
             .pix_x       ( pix_x           ),
             .pix_y       ( pix_y           ),
-            .pix_rgb     ( pix_rgb         ),
             .pix_luma    ( pix_luma        ),
             .frame_start ( cam_frame_start )
         );
@@ -423,20 +449,21 @@ module top_starfront #(
     //------------------------------------------------------------------------
     wire        cap_wr_en;
     wire [16:0] cap_addr;
-    wire [15:0] cap_data;
+    wire [7:0]  cap_data;
 
     cam_capture u_cam_capture (
         .ov7670_pclk  ( cam_pclk     ),
         .ov7670_href  ( ov7670_href  ),
         .ov7670_vsync ( ov7670_vsync ),
         .ov7670_data  ( ov7670_data  ),
+        .y_second     ( y_second_p   ),
         .cap_wr_en    ( cap_wr_en    ),
         .cap_addr     ( cap_addr     ),
         .cap_data     ( cap_data     )
     );
 
     wire [16:0] fb_addr_rd;
-    wire [15:0] fb_data_rd;
+    wire [7:0]  fb_data_rd;
 
     fb_mem u_fb_mem (
         .clk_wr  ( cam_pclk   ),
@@ -515,8 +542,9 @@ module top_starfront #(
         .pixel_y      ( vga_pixel_y    ),
         .active       ( vga_active     ),
         .frame_tick   ( vga_frame_tick ),
-        // digits: PID VER, then the window selection, then the register read-back
-        .row0         ( {cam_pid, cam_ver, 6'b0, hstart_sel, cam_readback} ),
+        // digits: PID VER, then the window selection (+4 when the Y byte is
+        // swapped), then the register read-back
+        .row0         ( {cam_pid, cam_ver, 5'b0, y_second, hstart_sel, cam_readback} ),
         .row1         ( {bytes_per_line, lines_per_frame}       ),
         .row2         ( {8'h00, pclk_freq_100k, 8'h00, frames_per_sec} ),
         // stars found, detection threshold, brightest pixel in the frame
@@ -546,6 +574,7 @@ module top_starfront #(
     // scaling - a 320x240 buffer pixel-doubled lands exactly on it.
     //
     // The middle of the cross is left open so the star itself stays visible.
+    // It is drawn in red, which is the only colour on a gray picture.
     //------------------------------------------------------------------------
     wire [9:0] mark_dx = (pixel_x_d > bright_x_s) ? (pixel_x_d - bright_x_s)
                                                   : (bright_x_s - pixel_x_d);

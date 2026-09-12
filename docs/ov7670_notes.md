@@ -78,6 +78,47 @@ out scrambled in a way that looks like channels bleeding into each other, try
 `TSLB` (`0x3A`) `= 0x0C` to swap the byte order. If they are merely *wrong*
 rather than scrambled, it is the register config (pitfall 2), not the order.
 
+**Since superseded.** The design has moved on again, to YUV422 with only the
+Y byte kept - see pitfall 11. RGB565 is recorded here because it is the
+format the colour image was proven in, and because the same `TSLB[3]` bit
+that swaps the RGB bytes swaps the YUV ones.
+
+### 11. YUV422 byte order is a register bit, and the chip's default is the other one
+
+For star work the sensor's own luminance is what is wanted: a true 8-bit Y
+computed from all three channels inside the sensor, not one approximated from
+a 16-bit colour pixel, and at half the frame buffer. `COM7 = 0x00` selects
+YUV422; two bytes per pixel still come out, so the line geometry, PCLK rate
+and every downstream counter are unchanged from RGB565.
+
+Which byte is Y is `TSLB[3]` together with `COM13[0]`:
+
+| `TSLB[3]` | `COM13[0]` | sequence |
+|---|---|---|
+| 0 | 0 | Y U Y V - Y first, this table (`TSLB = 0x04`, `COM13 = 0xC0`) |
+| 0 | 1 | Y V Y U |
+| 1 | 0 | U Y V Y - the power-on default (`TSLB = 0x0D`) |
+| 1 | 1 | V Y U Y |
+
+Most "the OV7670's YUV bytes are backwards" reports come from projects that
+never wrote TSLB and so got the default, Y second. This design writes 0x04
+and expects Y first, and because that is a datasheet reading rather than a
+measurement, the FPGA side keeps the choice open: `y_second` in
+`top_starfront.v` selects the byte at run time (KEY2 held + KEY4), and the
+capture testbench checks that both picks land Y and that the wrong one lands
+chroma, so the swap is visible rather than silent.
+
+What the wrong byte looks like: the test bars come out bright and dark in a
+jumbled order instead of a descending gray staircase, because U and V of
+yellow, cyan and the rest are nowhere near their luminance; a live picture is a
+fine vertical comb, because U and V alternate pixel to pixel and the display
+path keeps every other pixel.
+
+The colour matrix, AWB and UV saturation registers are still written. They
+shape U and V, which are discarded; Y is the fixed BT.601 sum. They are left
+as they were because this is the table that was proven on hardware, and there
+is nothing to gain from changing registers whose output is thrown away.
+
 ### 8. Use the built-in colour bars to split the problem in two - but set the right register
 
 The sensor has a digital test pattern generator that bypasses the pixel array
@@ -158,9 +199,10 @@ The seam drifts because the two frame rates are close but not related:
 a ratio of 1.919, not 2, so the crossing point walks slowly down the picture.
 
 Removing it properly needs a second frame buffer to capture into while the
-first is displayed. That does not fit: RGB565 costs 48 of the 60 BRAM tiles and
-two of them would need 96. It becomes affordable at 8 bits per pixel, which is
-where the grayscale astro path is heading anyway.
+first is displayed. In RGB565 that did not fit: 48 of the 60 BRAM tiles for one
+buffer, 96 for two. At 8-bit luminance a buffer is 24 tiles, so two now fit
+with the ILA still in place; it has simply not been done yet, because star
+fields do not move fast enough to tear.
 
 It is worth being clear that this does not matter for the actual application.
 Star fields do not move fast, and the centroid engine planned for M5 processes
@@ -195,8 +237,9 @@ stars. When the astro path is built it needs a **separate** profile:
   on small bright features — which is exactly what a star is. Denoise will
   delete them.
 - **YUV422 output** (`COM7 = 0x00`), keeping only the Y bytes. That gives a
-  true 8-bit luminance image at half the storage of RGB444, and luminance is
-  what a centroid algorithm actually consumes.
+  true 8-bit luminance image at half the storage of RGB565, and luminance is
+  what a centroid algorithm actually consumes. **Done, 2026-09-12** - see
+  pitfall 11 for the byte order.
 
 Also worth stating plainly: the OV7670 is a rolling-shutter consumer sensor with
 small pixels and a limited maximum exposure. It is fine for proving the pipeline,

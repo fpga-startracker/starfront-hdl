@@ -2,27 +2,35 @@
 
 //============================================================================
 // Module: cam_capture
-// Description: OV7670 RGB565 pixel capture pipeline, entirely in the PCLK domain.
+// Description: OV7670 luminance capture pipeline, entirely in the PCLK domain.
 //
-// Ported unchanged in behaviour from the Basys 3 project's rgb444_capture, where
-// it produced a correct live image. The three-cycle pipeline and the pixel_active
-// guard below are not stylistic - each one fixes a specific bug that took days to
-// find. See docs/ov7670_notes.md pitfalls 1 and 4 before touching either.
+// The sensor runs in YUV422 and sends two bytes per pixel, one luminance and
+// one chrominance, alternating U and V across pixel pairs:
+//   Y0 U0 Y1 V0 Y2 U2 Y3 V2 ...     TSLB[3] = 0, COM13[0] = 0  (this table)
+//   U0 Y0 V0 Y1 U2 Y2 V2 Y3 ...     TSLB[3] = 1, the sensor's power-on default
+// Only Y is kept, so a stored pixel is a single byte and the buffer is half
+// the size RGB565 needed. Which byte of the pair is Y is selected by
+// y_second, so a wrong guess about the sensor's byte order is a key press on
+// the bench rather than a rebuild.
 //
-// The camera outputs two bytes per pixel in RGB565:
-//   Byte 1 (even PCLK): { R[4:0], G[5:3] }
-//   Byte 2 (odd  PCLK): { G[2:0], B[4:0] }
-// so the stored pixel is simply the two bytes concatenated - no repacking.
+// Ported in behaviour from the Basys 3 project's rgb444_capture, where it
+// produced a correct live image. The three-cycle pipeline and the pixel_active
+// guard below are not stylistic - each one fixes a specific bug that took days
+// to find. See docs/ov7670_notes.md pitfalls 1 and 4 before touching either.
+// Pitfall 1 in particular is *hidden* by a luminance-only capture, because the
+// byte it needs is always one that was latched a cycle ago; the pipeline is
+// kept as it was so that the full-resolution tap (cam_pixel_stream), which
+// mirrors it, stays correct too.
 //
-// 3-cycle register pipeline avoids combinational read of ov7670_data
-// during BRAM write (prevents metastability / rainbow noise):
+// 3-cycle register pipeline avoids a combinational read of ov7670_data
+// during the BRAM write:
 //   Cycle 0: byte1_reg <= ov7670_data
 //   Cycle 1: byte2_reg <= ov7670_data, set pixel_rdy
-//   Cycle 2: compose RGB444 from registered bytes, write to BRAM
+//   Cycle 2: pick Y from the registered bytes, write to BRAM
 //
-// Downsamples 640x480 to 320x240 by capturing only even pixels on
-// even lines. First pixel of each line is skipped (pixel_active guard)
-// to prevent stale-data edge artifacts.
+// Downsamples 640x480 to 320x240 by capturing only even pixels on even lines.
+// The first pixel of each line is skipped (pixel_active guard) to prevent
+// stale-data edge artifacts.
 //============================================================================
 
 module cam_capture (
@@ -30,10 +38,11 @@ module cam_capture (
     input  wire        ov7670_href,
     input  wire        ov7670_vsync,
     input  wire [7:0]  ov7670_data,
+    input  wire        y_second,     // 0: Y is byte 1 of each pair, 1: byte 2
 
     output reg         cap_wr_en  = 1'b0,
     output reg  [16:0] cap_addr   = 17'd0,
-    output reg  [15:0] cap_data   = 16'd0
+    output reg  [7:0]  cap_data   = 8'd0
 );
 
     reg [10:0] pclk_cnt     = 11'd0;
@@ -78,7 +87,7 @@ module cam_capture (
                     // Both bytes are fully registered by now, which is the
                     // whole point of the pipeline - reading the bus here
                     // instead is what produced rainbow noise on the Basys 3.
-                    cap_data  <= { byte1_reg, byte2_reg };   // RGB565
+                    cap_data  <= y_second ? byte2_reg : byte1_reg;
                     cap_addr  <= pixel_addr;
                     cap_wr_en <= 1'b1;
                 end

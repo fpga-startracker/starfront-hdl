@@ -2,19 +2,31 @@
 
 //============================================================================
 // Module: ov7670_registers
-// Description: 94-entry OV7670 configuration ROM for native RGB444 output.
+// Description: 94-entry OV7670 configuration ROM for YUV422 output, of which
+//              the design keeps only the Y byte.
 //
-// Carried over unchanged from the Basys 3 OV7670 project, where this exact
-// table produced a correct live colour image. Sources: westonb/OV7670-Verilog
-// (MIT 6.111), the Linux kernel ov7670.c driver, and the Hamsterworks project.
+// Carried over from the Basys 3 OV7670 project, where this exact table (with
+// COM7 set to RGB) produced a correct live colour image. Sources:
+// westonb/OV7670-Verilog (MIT 6.111), the Linux kernel ov7670.c driver, and
+// the Hamsterworks project.
 //
-// Output format: RGB565 (COM15[5:4] = 01, with RGB444 switched off at 0x8C),
+// Output format: YUV422 (COM7 = 0x00), full 0x00-0xFF range (COM15[7:6]),
 // full VGA 640x480 with camera-side scaling OFF - the FPGA does the
-// downsampling. RGB565 replaced the original RGB444 because four bits per
-// channel is only sixteen levels: in a dim scene almost every pixel sits in the
-// bottom two or three of them, so a single LSB of sensor noise is a sixth of the
-// signal and the picture looks like coloured static. Green gets six bits here
-// and red and blue five, which is three to four times finer.
+// downsampling. Two bytes per pixel still come out, Y and one of U or V, and
+// the capture logic keeps Y. That is the sensor's own luminance at full 8-bit
+// precision, which is what a star detector wants and what a 16-bit colour
+// pixel had to be approximated into; it also halves the frame buffer.
+//
+// Byte order. With TSLB[3] = 0 and COM13[0] = 0, as written below, the
+// sequence is Y U Y V - Y first in each pair. The sensor's power-on default
+// (TSLB = 0x0D) is U Y V Y, Y second, which is what most "the byte order is
+// wrong" reports are about. The FPGA side selects the byte at run time
+// (y_second in cam_capture), so if the first picture is a jumble of stripes,
+// the fix is a key press and not a change here.
+//
+// The colour matrix, the AWB block and UV saturation are still programmed.
+// They only shape U and V, which are thrown away, and they are left exactly as
+// they were because this table is the hardware-proven one.
 //
 // color_bar selects the sensor's built-in 8-bar test pattern. Per the datasheet
 // the two selector bits are (SCALING_YSC[7], SCALING_XSC[7]) in that order:
@@ -83,11 +95,11 @@ module ov7670_registers (
         8'd0:  data = 16'h12_80;  // COM7: Reset all registers
 
         //==============================================================
-        // OUTPUT FORMAT — RGB444
+        // OUTPUT FORMAT — YUV422
         //==============================================================
-        8'd1:  data = 16'h12_04;  // COM7: RGB output
-        8'd2:  data = 16'h40_D0;  // COM15: full 00-FF range, bits[5:4]=01 = RGB565
-        8'd3:  data = 16'h8C_00;  // RGB444 off, so COM15[5:4] = 01 selects RGB565
+        8'd1:  data = 16'h12_00;  // COM7: YUV output
+        8'd2:  data = 16'h40_C0;  // COM15: full 00-FF output range; [5:4] unused in YUV
+        8'd3:  data = 16'h8C_00;  // RGB444 off (ignored in YUV mode, kept explicit)
         8'd4:  data = 16'h04_00;  // COM1: No CCIR656
 
         //==============================================================
@@ -99,11 +111,12 @@ module ov7670_registers (
         //==============================================================
         // DATA FORMAT & BYTE ORDER
         //==============================================================
-        8'd7:  data = 16'h3A_04;  // TSLB: Standard byte order, auto-window
-        8'd8:  data = 16'h3D_C0;  // COM13: Gamma enable + UV sat auto
+        8'd7:  data = 16'h3A_04;  // TSLB: [3]=0 -> Y first (Y U Y V); default 0x0D is Y second
+        8'd8:  data = 16'h3D_C0;  // COM13: Gamma enable + UV sat auto, [0]=0 keeps U before V
 
         //==============================================================
         // COLOR MATRIX (RGB565 coefficients — Linux kernel / OmniVision)
+        // Shapes U and V only; Y is fixed BT.601 luma. Left as proven.
         //==============================================================
         8'd9:  data = 16'h4F_B3;  // MTX1
         8'd10: data = 16'h50_B3;  // MTX2
