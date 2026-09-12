@@ -12,10 +12,12 @@ Basys 3 project's `Agent.md` warns about at length.
 | M1 | Clocking + HDMI output | done | tmds, vga | **passed 2026-09-04** |
 | M2 | SCCB read + camera ID probe | done | sccb | **passed 2026-09-04** |
 | M3 | Camera init + pixel stream geometry probe | done | – | **passed 2026-09-04** — `0500 01E0` |
-| M4 | Frame buffer + live image | done | capture | **passed 2026-09-04** |
+| M4 | Frame buffer + live image | done | capture | **passed 2026-09-04** in RGB565; the YUV422 / 8-bit gray version of 2026-09-12 is not yet seen on hardware |
 | M5 | Streaming star detection at full 640×480 | done | star | **passed 2026-09-04** — tracks a phone torch in a dark room |
+| M6 | Sub-pixel centroiding, measured against a real star field | done | centroid — RTL matches the model bit for bit | not yet on hardware |
 
-The `bringup` build variant stops after M4; `tracker` adds M5.
+The `bringup` build variant stops after M4; `tracker` adds M5; `bench` is M6 on
+its own, with no camera at all.
 
 A live image on screen means M2 and M4 both hold: the image only replaces the
 overlay once `init_done` is high, and `init_done` only happens after the ID
@@ -25,8 +27,9 @@ hold KEY2 and read row 1, which should say `0500 01E0`.
 ## What the board shows you
 
 **Keys:** KEY1 reset · KEY2 hold to force the status overlay over a live image ·
-KEY3 toggle the sensor's 8-bar colour test pattern · KEY4 step the horizontal
-window position (see pitfall 9 in `docs/ov7670_notes.md`).
+KEY3 toggle the sensor's 8-bar test pattern · KEY4 step the horizontal window
+position (see pitfall 9 in `docs/ov7670_notes.md`) · KEY2 held + KEY4 swap
+which byte of each YUV422 pair is taken as luminance (see M4 below).
 
 **LEDs (active low — lit means the signal is high):**
 
@@ -43,7 +46,7 @@ eight large hex digits; row 3 is eight blocks.
 | Area | Content | Expect |
 |---|---|---|
 | banner | red = no camera, amber = camera but bad stream, green = all good | green |
-| row 0, red tab | `PID VER`, window selection, register read-back | `7673 0001` |
+| row 0, red tab | `PID VER`, window selection (+4 while the Y byte is swapped), register read-back | `7673 0101` (`7673 0501` swapped) |
 | row 1, green tab | `bytes/line` then `lines/frame` | `0500 01E0` |
 | row 2, blue tab | `PCLK / 100 kHz` then `frames/sec` | `00FA 001E` |
 | row 3, amber tab | `id_ok rw_ok init_done stream_ok data href vsync pclk` | all eight lit |
@@ -176,9 +179,11 @@ buffer:
 
 | | tiles |
 |---|---|
-| RGB565 frame buffer, 320x240 x 16 bit | 48 |
+| 8-bit luminance frame buffer, 320x240 (`bringup`, `tracker`) | 24 |
+| stored star fields, 2 x 256x256 x 8 bit (`bench`) | 32 |
 | ILA, 1024 deep x ~93 probe bits | ~3 |
 | star detector line buffers | 0 - distributed RAM, ~570 LUTs |
+| centroid pipeline: 9x9 window, per-column background, star list | 0 - all distributed RAM |
 | **available** | **60** |
 
 The streaming star detector deliberately costs no block RAM: four line buffers
@@ -186,9 +191,16 @@ are 20 Kbit and go in LUTs. That is the whole reason it processes at the
 camera's full 640x480 while the display path settles for a quarter of that -
 buffering a 640x480 frame at 8 bits would need 75 tiles.
 
-If something needs more block RAM, in order: shrink or drop the ILA (bring-up
-is what it was there for), then move the display buffer to 8-bit grayscale,
-which roughly halves it.
+The display buffer went from 48 tiles to 24 when the sensor moved to YUV422
+and the buffer to 8-bit luminance; that is the headroom a second buffer (to
+stop tearing) or a star catalogue would live in. If something needs more, the
+next lever is the ILA (bring-up is what it was there for). On the `bench`
+variant the lever is `N_FRAMES` - each stored frame is 16 tiles.
+
+Every memory the centroid pipeline needs is deliberately distributed RAM: eight
+line buffers of 256 x 12 bits, the binner's 256-word column accumulator, the
+256-word per-column background, and a 2 x 64 entry star list. None of them is
+more than a few kilobits, and block RAM is what runs out on this part.
 
 ## M3 — camera init and pixel stream geometry
 
@@ -211,20 +223,154 @@ by two.
 
 ## M4 — frame buffer and live image
 
-Capture goes into a 320×240 × 12-bit inferred block RAM and is pixel-doubled
-back to 640×480 for display. The overlay hands over to the live image
-automatically once `init_done` goes high.
+The sensor runs in YUV422 and only the Y byte of each pixel is kept. Capture
+goes into a 320×240 × 8-bit inferred block RAM and is pixel-doubled back to
+640×480 for display, the same byte on all three channels. The overlay hands
+over to the live image automatically once `init_done` goes high.
 
-1. **Colour bars first.** Press KEY3 to switch the sensor to its 8-bar test
+1. **Test bars first.** Press KEY3 to switch the sensor to its 8-bar test
    pattern. That re-runs the whole register table, so the screen goes back to
-   the overlay for about a tenth of a second and then shows the bars.
-   Stable, correctly ordered bars mean capture, block RAM and display are all
-   correct, and any remaining problem is in the sensor's ISP configuration.
-2. **Then press KEY3 again** for the live image.
+   the overlay for about a tenth of a second and then shows the bars. In
+   luminance the eight bars are a **descending gray staircase**: white,
+   then progressively darker steps, black on the right. Stable bars in that
+   order mean capture, block RAM and display are all correct, and any
+   remaining problem is in the sensor's ISP configuration.
+2. **If the bars are bright and dark in a jumbled order,** or the live picture
+   is a fine vertical comb, the FPGA is keeping the chroma byte instead of the
+   luma one. Hold KEY2 and press KEY4 once: that swaps the byte pick
+   instantly, and the overlay's window digit on row 0 reads `05` instead of
+   `01` while swapped. If that fixes it, make `Y_SECOND_DEFAULT` 1 in
+   `top_starfront.v` so the next build comes up right.
+3. **Then press KEY3 again** for the live image.
 
-**Pass:** a live colour image. That completes camera bring-up.
+**Pass:** a live grayscale image, with the test bars in the right order. That
+completes camera bring-up.
 
-If the bars are right but the live image has wrong colours, work through
-pitfalls 2, 5 and 7 in `docs/ov7670_notes.md` — that is the ISP configuration,
-not the FPGA. If the bars themselves are wrong, the problem is in the capture
-path or the data bus wiring.
+If the bars are right but the live image is wrong, work through pitfalls 2
+and 5 in `docs/ov7670_notes.md` — that is the ISP configuration, not the
+FPGA. If the bars themselves are wrong, the problem is in the capture path or
+the data bus wiring.
+
+
+## M6 — sub-pixel centroiding
+
+This one has no camera in it. `top_starfront_bench` replays star fields out of
+block RAM through the same detector a camera would feed, and draws what it
+found. The point is that accuracy needs a known answer, and no camera pointed at
+a monitor gives you one repeatably.
+
+```bash
+uv run bench/prepare_frames.py --report      # DUST frames -> build/frames.mem
+./scripts/build.sh impl bench
+./scripts/program.sh bench
+```
+
+The screen is the image on the left at 2x, a cross on every star found, and the
+detector's own state as text down the right.
+
+1. **The picture appears.** A round star field on the left, text on the right.
+   If the field looks like a smooth disc with a few obvious dots and nothing
+   else, `build/frames.mem` did not load and you are looking at the synthetic
+   pattern `frame_source.v` falls back to. Check the Vivado log for the
+   `$readmemh` warning.
+2. **STARS is not zero,** and roughly matches what the model says for the same
+   frame — `bench/prepare_frames.py --report` prints that number.
+3. **DROP is zero.** It counts seeds thrown away because the centroid engine was
+   still busy with the previous one. Anything but zero means the field is denser
+   than the engine can keep up with, and the star list is incomplete.
+4. **The crosses sit on the stars.** This is the whole thing: the marker is
+   drawn from the centroid, so a marker that is visibly off its star is a bug in
+   the pipeline and not in the display.
+5. **FPS reads 0x18** (24). That is one 1024x1024 frame every 42 ms at the
+   25 MHz pixel clock, which is the replay rate, not a limit of the detector.
+
+KEY3 toggles continuous scrolling, KEY4 holds the replay so the last result
+stays on screen while you read it, and KEY2 scrolls on by a single display pixel
+at a time. A host over JTAG can take all three - see section 7.
+
+**Pass:** crosses on the stars, DROP zero, and STARS within a couple of the
+number the model reports for the same frame.
+
+### 6. The sub-pixel check, on the board, with no host
+
+Scrolling offsets the frame store's read address by whole *display* pixels, and
+the 4x4 binner turns that into quarter-binned-pixel motion. So the centroid
+readout has a predictable answer:
+
+1. KEY4 to hold, KEY3 off so it is not scrolling on its own.
+2. Note X. For the frame shipped in the bitstream it reads `89.6C`.
+3. Press KEY2 four times. **X must fall by exactly `0100`** - same fractional
+   digits, one lower in the integer part: `88.6C`.
+
+Four steps is a whole binned pixel and is exact for every star in the field
+(measured spread 0.002 px). The individual quarter-steps are not, and that is
+the interesting part - they go
+
+```
+89.6C -> 89.24 -> 88.E4 -> 88.A4 -> 88.6C
+   -0.2812  -0.2500  -0.2500  -0.2188
+```
+
+which is the **S-curve** of an undersampled centroider, the error the paper
+names in section 3.2. Its amplitude here is 0.031 binned pixels. Seeing that
+sequence on the screen is a stronger statement than any single number: it says
+the pipeline is resolving a quarter of a pixel, and it says by how much
+undersampling bends the answer.
+
+The accuracy numbers themselves come from `bench/evaluate.py` over the whole
+1378-frame set, not from the board — see `docs/centroiding.md`. What the board
+proves is that the same arithmetic runs in hardware at video rate, and
+`sim/centroid` is what proves it is the same arithmetic.
+
+
+## M6b - streaming frames from a PC, and scoring the board
+
+The bench bitstream carries a JTAG-to-AXI master. A host can write a new frame
+into the store and read the star list back out, over the same USB cable that
+carries the bitstream. That readback is the point: every accuracy figure in
+`docs/centroiding.md` is the software model's, tied to the RTL by two frames in
+simulation, and this is what measures the hardware itself.
+
+```bash
+uv run bench/export_stream.py --count 50 --skip-empty
+./scripts/program.sh bench
+./scripts/stream_video.sh build/stream 50 build/hw_stars.csv
+uv run bench/score_hardware.py build/hw_stars.csv build/stream/truth.csv
+```
+
+1. **The link is checked first.** `feed_video.tcl` reads the magic register and
+   refuses to send anything if it does not come back as `53544652`. A wrong
+   answer there means either the bitstream is not loaded or Vivado's
+   `get_property DATA` returns its words in the other order on this version -
+   both of which otherwise look exactly like a stream of black frames.
+2. **Each frame prints its own line** with the star count, the drop count and
+   whether the list filled up. Compare those with what
+   `bench/prepare_frames.py --report` says the model finds.
+3. **`score_hardware.py` prints the same statistics `evaluate.py` prints**, over
+   the frames actually streamed, so the two can be put side by side. A material
+   difference there is a difference in the hardware, not in the scoring.
+
+Expect a few frames a second. This is the debug cable, not a video link: the
+AX7010's 32 MB QSPI flash is on `PS_MIO0..MIO6` and the Zynq's Quad-SPI
+controller is MIO-only, so a PL-only design cannot reach it, and the only other
+PL-side memory is a 512-byte EEPROM. A megabyte of image has to be shifted down
+JTAG a kilobyte at a time. The detector still runs at 24 fps on whatever is
+loaded - what arrives slowly is new content.
+
+**Measured 2026-09-09:** 20 frames at **2.65 frames/s**, 0 dropped on every
+frame, list never full. The board's median centroid error came out 0.4770
+display pixels against the model's 0.4697 on the same frames - see
+`docs/centroiding.md`. Vivado's `get_property DATA` does return its beats in
+reverse, as `axi_read` assumes, and the magic-register check confirmed it before
+a byte of image was sent.
+
+Two things bit on the first run and are now handled in the script:
+
+- **`refresh_hw_device -update_hw_probes false` hides the JTAG-AXI master.**
+  Without the probes scan there is no `hw_axi` object at all, and the error
+  reads as "no master on the device", which is indistinguishable from having
+  loaded the wrong bitstream.
+- **Turning the scroll off does not zero it.** Whatever it had drifted to keeps
+  shifting the image, and an offset that is not a multiple of four resamples the
+  binned frame - the board scored 0.599 instead of 0.477 until the script
+  stepped the scroll back to zero first.
