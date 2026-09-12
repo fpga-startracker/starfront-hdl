@@ -220,11 +220,46 @@ frame buffer exists so a human can see what the camera sees.
 
 Device address is `0x42` for a write and `0x43` for a read.
 
-## Register profile for star tracking (planned, milestone 5)
+## Register profile for star tracking
 
 The 94-register table from the Basys 3 project is tuned for a pleasant-looking
 consumer image, and almost every one of those choices is wrong for photographing
-stars. When the astro path is built it needs a **separate** profile:
+stars. The astro profile exists as of 2026-09-12: `ov7670_registers.v` takes
+an `astro` input and a two-bit `preset`, and the `tracker` build toggles them
+from KEY3 (alone: astro on/off; with KEY2 held: next preset). Changing either
+re-runs the whole table. It overrides only these entries and leaves the rest of
+the proven table alone:
+
+| register | consumer | astro | why |
+|---|---|---|---|
+| COM8 `0x13` | `0xE7` | `0xE0` | AGC, AEC and AWB off; `0xE0` is the value the table already uses mid-sequence |
+| COM13 `0x3D` | `0xC0` | `0x40` | gamma bypassed, so Y is linear |
+| COM16 `0x41` | `0x18` | `0x00` | edge enhancement and de-noise off |
+| REG76 `0x76` | `0xE1` | `0x21` | black and white pixel correction off |
+| EDGE `0x3F`, DNSTH `0x4C` | untouched | `0x00` | nothing left sharpening or smoothing |
+| AECHH `0x07`, AECH `0x10`, COM1 `0x04` | AEC-driven | 504 lines | one whole frame of exposure |
+| GAIN `0x00`, CLKRC `0x11` | `0x00`, `0x80` | per preset | see below |
+
+Exposure is always a full frame. The presets stretch the frame with the clock
+prescaler, which stretches the exposure with it, and raise the gain:
+
+| preset | CLKRC | PCLK | frame | exposure | GAIN | overlay row 0 |
+|---|---|---|---|---|---|---|
+| 0 | `0x80` | 25 MHz | 30 fps | 16 ms | `0x10` ~2x | `81` |
+| 1 | `0x83` | 6.25 MHz | 7.5 fps | 63 ms | `0x40` ~4x | `A1` |
+| 2 | `0x8F` | 1.56 MHz | 1.9 fps | 253 ms | `0x70` ~8x | `C1` |
+| 3 | `0x9F` | 0.78 MHz | 0.94 fps | 505 ms | `0xF0` ~16x | `E1` |
+
+Everything downstream counts PCLK edges, so the capture, the detector and the
+geometry probe simply run slower; the overlay's PCLK/100kHz and frames/sec
+readouts show it (`00FA 001E` at preset 0, `0007 0000` at preset 3). Longer
+still needs dummy lines (`0x92`/`0x93`), which is the next lever if half a
+second is not enough.
+
+**None of this has been pointed at a sky.** The values are datasheet reasoning
+and the consumer table's own proven fragments; the first night test is what
+decides whether the gain steps are sensible and whether the sensor sees
+anything at all. The reasoning behind each choice:
 
 - **Manual exposure and gain.** `COM8 = 0x00` turns off AGC, AEC and AWB.
   Auto-exposure will happily crush a field of faint stars into black because
@@ -238,8 +273,8 @@ stars. When the astro path is built it needs a **separate** profile:
   delete them.
 - **YUV422 output** (`COM7 = 0x00`), keeping only the Y bytes. That gives a
   true 8-bit luminance image at half the storage of RGB565, and luminance is
-  what a centroid algorithm actually consumes. **Done, 2026-09-12** - see
-  pitfall 11 for the byte order.
+  what a centroid algorithm actually consumes. This one is on in both
+  profiles - see pitfall 11 for the byte order.
 
 Also worth stating plainly: the OV7670 is a rolling-shutter consumer sensor with
 small pixels and a limited maximum exposure. It is fine for proving the pipeline,

@@ -43,6 +43,9 @@
 module star_centroid #(
     parameter integer IMG_W      = 256,
     parameter integer IMG_H      = 256,
+    parameter integer XW         = 8,      // coordinate widths: 8 for the
+    parameter integer YW         = 8,      // bench's 256x256, 10/9 for 640x480
+    parameter integer CW         = 16,     // list entry width, >= max(XW,YW)+FRAC
     parameter integer WIN        = 9,
     parameter integer PIXW       = 12,
     parameter integer FRAC       = 8,
@@ -63,11 +66,11 @@ module star_centroid #(
     input  wire        clk,
     input  wire        rst,
 
-    input  wire        in_valid,
-    input  wire [7:0]  in_x,
-    input  wire [7:0]  in_y,
-    input  wire [7:0]  in_code,
-    input  wire        frame_start,     // one pulse before the first pixel
+    input  wire          in_valid,
+    input  wire [XW-1:0] in_x,
+    input  wire [YW-1:0] in_y,
+    input  wire [7:0]    in_code,
+    input  wire          frame_start,   // one pulse before the first pixel
 
     // Where the illuminated disc currently sits, relative to FOV_CX/FOV_CY, in
     // binned pixels. Zero unless the frame source is scrolling: the mask has to
@@ -78,30 +81,30 @@ module star_centroid #(
     input  wire signed [5:0] fov_oy,
 
     // Published on frame_start and stable for the whole of the next frame
-    output reg  [6:0]  star_count,
-    output reg  [6:0]  dropped,
-    output reg         overflow,
-    output reg  [15:0] best_x,
-    output reg  [15:0] best_y,
-    output reg  [19:0] best_sum,
-    output reg  [15:0] frame_count,
+    output reg  [6:0]    star_count,
+    output reg  [6:0]    dropped,
+    output reg           overflow,
+    output reg  [CW-1:0] best_x,
+    output reg  [CW-1:0] best_y,
+    output reg  [19:0]   best_sum,
+    output reg  [15:0]   frame_count,
 
     // Star list read port, combinational, reads the published bank
-    input  wire [5:0]  rd_addr,
-    output wire [15:0] rd_x,
-    output wire [15:0] rd_y,
-    output wire [19:0] rd_sum,
-    output wire [6:0]  rd_npx,
+    input  wire [5:0]    rd_addr,
+    output wire [CW-1:0] rd_x,
+    output wire [CW-1:0] rd_y,
+    output wire [19:0]   rd_sum,
+    output wire [6:0]    rd_npx,
 
     // A second read port, for the host over AXI. Separate rather than muxed
     // because the marker drawer walks the list every scan line and would
     // otherwise have to be interrupted mid-line to answer a read - and a
     // corrupted readback is worse than a few extra LUTs.
-    input  wire [5:0]  rd2_addr,
-    output wire [15:0] rd2_x,
-    output wire [15:0] rd2_y,
-    output wire [19:0] rd2_sum,
-    output wire [6:0]  rd2_npx,
+    input  wire [5:0]    rd2_addr,
+    output wire [CW-1:0] rd2_x,
+    output wire [CW-1:0] rd2_y,
+    output wire [19:0]   rd2_sum,
+    output wire [6:0]    rd2_npx,
 
     // For the status panel and the ILA
     output wire [7:0]  bg_code,
@@ -120,19 +123,20 @@ module star_centroid #(
     wire [PIXW-1:0] lin;
     pix_lut u_lut_pix (.code(in_code), .lin(lin));
 
-    wire [7:0] fov_cx_e = FOV_CX[7:0] + {{2{fov_ox[5]}}, fov_ox};
-    wire [7:0] fov_cy_e = FOV_CY[7:0] + {{2{fov_oy[5]}}, fov_oy};
+    wire [XW-1:0] fov_cx_e = FOV_CX[XW-1:0] + {{(XW-6){fov_ox[5]}}, fov_ox};
+    wire [YW-1:0] fov_cy_e = FOV_CY[YW-1:0] + {{(YW-6){fov_oy[5]}}, fov_oy};
 
     function in_disc;
-        input [7:0] px;
-        input [7:0] py;
-        reg [7:0] adx, ady;
-        reg [17:0] r2;
+        input [XW-1:0] px;
+        input [YW-1:0] py;
+        reg [XW-1:0] adx;
+        reg [YW-1:0] ady;
+        reg [21:0]   r2;
         begin
             adx = (px > fov_cx_e) ? (px - fov_cx_e) : (fov_cx_e - px);
             ady = (py > fov_cy_e) ? (py - fov_cy_e) : (fov_cy_e - py);
             r2  = (adx * adx) + (ady * ady);
-            in_disc = (FOV_R == 0) || (r2 <= FOV_R2[17:0]);
+            in_disc = (FOV_R == 0) || (r2 <= FOV_R2[21:0]);
         end
     endfunction
 
@@ -145,9 +149,31 @@ module star_centroid #(
     wire [7:0]      thr_seed_code;
     wire [7:0]      thr_grow_c;
     wire [PIXW-1:0] bg_lin;
+    wire            bg_sweeping;
+
+    //------------------------------------------------------------------------
+    // The detector starts at the first frame boundary after reset, not at the
+    // first pixel. bg_track spends IMG_W cycles after reset re-priming its
+    // column RAM, and while it does, pixels cannot update the followers - so
+    // a frame that begins during the sweep would have its first row tracked
+    // by the model and not by the hardware, and the two would drift apart by
+    // a step for the rest of time. Ignoring pixels until a frame_start arrives
+    // with the sweep finished makes the hardware's first tracked frame exactly
+    // the model's cold start. On the bench the mask hid this, because row 0
+    // is outside the illuminated disc; the camera has no mask.
+    //------------------------------------------------------------------------
+    reg armed = 1'b0;
+
+    always @(posedge clk) begin
+        if (rst)                              armed <= 1'b0;
+        else if (frame_start && !bg_sweeping) armed <= 1'b1;
+    end
+
+    wire in_valid_g = in_valid && armed;
 
     bg_track #(
         .IMG_W      ( IMG_W      ),
+        .XW         ( XW         ),
         .HALF       ( HALF       ),
         .K_SEED_Q   ( K_SEED_Q   ),
         .K_GROW_Q   ( K_GROW_Q   ),
@@ -155,14 +181,14 @@ module star_centroid #(
     ) u_bg (
         .clk      ( clk           ),
         .rst      ( rst           ),
-        .in_valid ( in_valid      ),
+        .in_valid ( in_valid_g    ),
         .in_x     ( in_x          ),
-        .in_y     ( in_y          ),
         .in_code  ( in_code       ),
         .in_fov   ( pix_in_fov    ),
         .thr_seed ( thr_seed_code ),
         .thr_grow ( thr_grow_c    ),
         .bg_lin   ( bg_lin        ),
+        .sweeping ( bg_sweeping   ),
         .bg_code  ( bg_code       ),
         .mad_acc  ( mad_acc       )
     );
@@ -178,7 +204,7 @@ module star_centroid #(
     // the incoming pixel there are WIN rows to build a window from.
     //------------------------------------------------------------------------
     wire [PIXW-1:0] row [1:WIN-1];
-    wire [9:0]      lb_addr = {2'b00, in_x};
+    wire [9:0]      lb_addr = in_x;         // zero-extended to the buffer's 10 bits
 
     genvar gl;
     generate
@@ -190,8 +216,8 @@ module star_centroid #(
                 assign din = row[gl-1];
             end
             line_buffer #(.WIDTH(PIXW), .DEPTH(IMG_W)) u_lb (
-                .clk  ( clk       ),
-                .we   ( in_valid  ),
+                .clk  ( clk         ),
+                .we   ( in_valid_g  ),
                 .addr ( lb_addr   ),
                 .din  ( din       ),
                 .dout ( row[gl]   )
@@ -204,7 +230,8 @@ module star_centroid #(
     // 0 the leftmost, new pixels enter at the right. Centre is w[CTR].
     //------------------------------------------------------------------------
     reg [PIXW-1:0] w [0:NPIX-1];
-    reg [7:0]      cx = 8'd0, cy = 8'd0;
+    reg [XW-1:0]   cx = {XW{1'b0}};
+    reg [YW-1:0]   cy = {YW{1'b0}};
     reg            win_valid = 1'b0;
 
     integer r, c;
@@ -212,7 +239,7 @@ module star_centroid #(
     always @(posedge clk) begin
         if (rst) begin
             win_valid <= 1'b0;
-        end else if (in_valid) begin
+        end else if (in_valid_g) begin
             for (r = 0; r < WIN; r = r + 1)
                 for (c = 0; c < WIN-1; c = c + 1)
                     w[r*WIN+c] <= w[r*WIN+c+1];
@@ -221,8 +248,8 @@ module star_centroid #(
                 w[r*WIN + WIN-1] <= row[WIN-1-r];      // row[8] is y-8, into row 0
             w[(WIN-1)*WIN + WIN-1] <= lin;
 
-            cx        <= in_x - HALF[7:0];
-            cy        <= in_y - HALF[7:0];
+            cx        <= in_x - HALF[XW-1:0];
+            cy        <= in_y - HALF[YW-1:0];
             win_valid <= (in_x >= (WIN-1)) && (in_y >= (WIN-1));
         end else begin
             win_valid <= 1'b0;
@@ -263,13 +290,14 @@ module star_centroid #(
     //------------------------------------------------------------------------
     // One cluster at a time
     //------------------------------------------------------------------------
-    wire        eng_busy, eng_valid, eng_reject;
-    wire [15:0] eng_x, eng_y;
-    wire [18:0] eng_sum;
-    wire [6:0]  eng_npx;
+    wire          eng_busy, eng_valid, eng_reject;
+    wire [CW-1:0] eng_x, eng_y;
+    wire [18:0]   eng_sum;
+    wire [6:0]    eng_npx;
 
     cg_engine #(
         .WIN(WIN), .HALF(HALF), .PIXW(PIXW), .FRAC(FRAC),
+        .XW(XW), .YW(YW), .CW(CW),
         .CG_HALF(CG_HALF), .MIN_NPX(MIN_NPX), .MIN_SUM(MIN_SUM)
     ) u_cg (
         .clk        ( clk                 ),
@@ -278,8 +306,8 @@ module star_centroid #(
         .win        ( win_flat            ),
         .reg_in     ( region              ),
         .bg         ( bg_lin              ),
-        .x0         ( cx - HALF[7:0]      ),
-        .y0         ( cy - HALF[7:0]      ),
+        .x0         ( cx - HALF[XW-1:0]   ),
+        .y0         ( cy - HALF[YW-1:0]   ),
         .busy       ( eng_busy            ),
         .out_valid  ( eng_valid           ),
         .out_x      ( eng_x               ),
@@ -293,17 +321,17 @@ module star_centroid #(
     // Star list, double buffered: the detector fills one bank while the display
     // reads the other, so a marker never lands half way between two frames.
     //------------------------------------------------------------------------
-    (* ram_style = "distributed" *) reg [15:0] lx  [0:2*N_STAR_MAX-1];
-    (* ram_style = "distributed" *) reg [15:0] ly  [0:2*N_STAR_MAX-1];
+    (* ram_style = "distributed" *) reg [CW-1:0] lx  [0:2*N_STAR_MAX-1];
+    (* ram_style = "distributed" *) reg [CW-1:0] ly  [0:2*N_STAR_MAX-1];
     (* ram_style = "distributed" *) reg [19:0] lsm [0:2*N_STAR_MAX-1];
     (* ram_style = "distributed" *) reg [6:0]  lnp [0:2*N_STAR_MAX-1];
 
     reg        bank      = 1'b0;      // the one being written
     reg [6:0]  wcount    = 7'd0;
     reg [6:0]  dropcount = 7'd0;
-    reg        ovf       = 1'b0;
-    reg [15:0] bx = 16'd0, by = 16'd0;
-    reg [19:0] bs = 20'd0;
+    reg          ovf       = 1'b0;
+    reg [CW-1:0] bx = {CW{1'b0}}, by = {CW{1'b0}};
+    reg [19:0]   bs = 20'd0;
 
     wire full = (wcount >= N_STAR_MAX[6:0]);
 
@@ -327,8 +355,8 @@ module star_centroid #(
             dropped     <= 7'd0;
             overflow    <= 1'b0;
             frame_count <= 16'd0;
-            bx <= 16'd0; by <= 16'd0; bs <= 20'd0;
-            best_x <= 16'd0; best_y <= 16'd0; best_sum <= 20'd0;
+            bx <= {CW{1'b0}}; by <= {CW{1'b0}}; bs <= 20'd0;
+            best_x <= {CW{1'b0}}; best_y <= {CW{1'b0}}; best_sum <= 20'd0;
         end else if (frame_start) begin
             star_count  <= wcount;
             dropped     <= dropcount;
@@ -342,7 +370,7 @@ module star_centroid #(
             wcount      <= 7'd0;
             dropcount   <= 7'd0;
             ovf         <= 1'b0;
-            bx <= 16'd0; by <= 16'd0; bs <= 20'd0;
+            bx <= {CW{1'b0}}; by <= {CW{1'b0}}; bs <= 20'd0;
         end else begin
             if (is_seed && eng_busy && (dropcount != 7'h7F))
                 dropcount <= dropcount + 7'd1;

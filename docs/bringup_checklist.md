@@ -14,10 +14,12 @@ Basys 3 project's `Agent.md` warns about at length.
 | M3 | Camera init + pixel stream geometry probe | done | – | **passed 2026-09-04** — `0500 01E0` |
 | M4 | Frame buffer + live image | done | capture | **passed 2026-09-04** in RGB565; the YUV422 / 8-bit gray version of 2026-09-12 is not yet seen on hardware |
 | M5 | Streaming star detection at full 640×480 | done | star | **passed 2026-09-04** — tracks a phone torch in a dark room |
-| M6 | Sub-pixel centroiding, measured against a real star field | done | centroid — RTL matches the model bit for bit | not yet on hardware |
+| M6 | Sub-pixel centroiding, measured against a real star field | done | centroid — RTL matches the model bit for bit | **passed 2026-09-09** — 20 streamed frames, 0.477 px median (see M6b) |
+| M7 | The centroiding pipeline on the live camera, with a star-field sensor profile | done | centroid at 640×480 — RTL matches the model bit for bit | not yet on hardware |
 
-The `bringup` build variant stops after M4; `tracker` adds M5; `bench` is M6 on
-its own, with no camera at all.
+The `bringup` build variant stops after M4; `tracker` is M7 (`ENABLE_STARS=2`;
+1 rebuilds the older M5 peak detector); `bench` is M6 on its own, with no
+camera at all.
 
 A live image on screen means M2 and M4 both hold: the image only replaces the
 overlay once `init_done` is high, and `init_done` only happens after the ID
@@ -30,6 +32,10 @@ hold KEY2 and read row 1, which should say `0500 01E0`.
 KEY3 toggle the sensor's 8-bar test pattern · KEY4 step the horizontal window
 position (see pitfall 9 in `docs/ov7670_notes.md`) · KEY2 held + KEY4 swap
 which byte of each YUV422 pair is taken as luminance (see M4 below).
+
+In the `tracker` build KEY3 is the star-field sensor profile instead of the
+test bars: KEY3 toggles it, KEY2 held + KEY3 steps its exposure/gain preset
+(see M7 below).
 
 **LEDs (active low — lit means the signal is high):**
 
@@ -46,10 +52,11 @@ eight large hex digits; row 3 is eight blocks.
 | Area | Content | Expect |
 |---|---|---|
 | banner | red = no camera, amber = camera but bad stream, green = all good | green |
-| row 0, red tab | `PID VER`, window selection (+4 while the Y byte is swapped), register read-back | `7673 0101` (`7673 0501` swapped) |
+| row 0, red tab | `PID VER`, then profile and window as two digits, register read-back | `7673 0101` (`0501` Y byte swapped; `8101`/`A101`/`C101`/`E101` astro presets 0-3 in the `tracker` build) |
 | row 1, green tab | `bytes/line` then `lines/frame` | `0500 01E0` |
 | row 2, blue tab | `PCLK / 100 kHz` then `frames/sec` | `00FA 001E` |
-| row 3, amber tab | `id_ok rw_ok init_done stream_ok data href vsync pclk` | all eight lit |
+| row 3, violet tab (`tracker` only) | `stars thr bg dropped` — stars listed, grow threshold, background, seeds dropped | stars > 0 with a light in shot, dropped `00` |
+| row 4, amber tab | `id_ok rw_ok init_done stream_ok data href vsync pclk` | all eight lit |
 | bottom strip | bar stepping once per frame | moving |
 
 `0500` is 1280 and `01E0` is 480; `00FA` is 250, meaning PCLK is 25.0 MHz.
@@ -376,3 +383,64 @@ Two things bit on the first run and are now handled in the script:
   shifting the image, and an offset that is not a multiple of four resamples the
   binned frame - the board scored 0.599 instead of 0.477 until the script
   stepped the scroll back to zero first.
+
+
+## M7 — the centroiding pipeline on the camera
+
+The `tracker` build runs `star_centroid` - the pipeline M6 measured against
+DUST - on the live 640x480 luminance stream, with no binning and no
+field-of-view mask, and draws a red cross on every star in its list. KEY3
+switches the sensor to the star-field profile (`docs/ov7670_notes.md`, last
+section): auto exposure, gain and white balance off, gamma bypassed, de-noise
+and pixel correction off, exposure fixed at one frame. Nothing here has been
+seen on hardware yet; this is what to look for.
+
+```bash
+./scripts/build.sh impl tracker
+./scripts/program.sh tracker
+```
+
+1. **Bring-up first.** The consumer profile is the power-up default, so the
+   picture should look exactly as it does in `bringup`, and rows 0-2 and the
+   flags should read as in M3/M4. Row 0's third pair reads `01`.
+2. **A torch in a dark room.** Row 3 (violet) reads `stars thr bg dropped`.
+   With one light in shot: stars `01` or a few (a torch is not a point source
+   and may fragment), dropped `00`, a cross centred on the light. Move it;
+   the cross must follow with no lag beyond a frame. `bg` is the sky
+   background code the column follower settled on, `thr` the grow threshold -
+   `thr - bg` is the noise margin, and it should be a few codes, not tens.
+3. **Astro profile.** Press KEY3. The table re-runs (overlay for a tenth of a
+   second), row 0's third pair reads `81`, and the picture goes flat and
+   dark: no auto exposure is holding the room at mid-gray any more. The torch
+   still shows, and still has its cross. If the picture is *identical* to
+   before, the profile did not take - check that `init_done` cycled.
+4. **Presets.** Hold KEY2 and press KEY3: `A1`, `C1`, `E1`, back to `81`. At
+   each step row 2 changes: PCLK/100kHz reads `00FA`, `003E`, `000F`, `0007`
+   and frames/sec `001E`, `0007`, `0001`, `0000`. The picture gets brighter
+   and noisier with each - preset 3 is half a second of exposure at 16x gain.
+   If `stream_ok` (LED4) drops at the slow presets, the geometry probe's
+   window is too short for a one-second frame and needs widening; the
+   detector does not care.
+5. **The sky.** Preset 2 or 3, a lens focused slightly short of infinity so a
+   star covers two or three pixels, and a dark site. What to record: the
+   number of stars listed against what is visible, whether crosses sit on
+   stars or on noise, and `thr - bg`. This is the first measurement of the
+   sensor itself, and it is the one that says whether the OV7670 goes any
+   further.
+
+**Pass:** crosses on the torch in both profiles, dropped `00`, and the four
+presets reading as above. The sky test has no pass criterion yet; it produces
+the numbers the next decision is made from.
+
+Two things the bench cannot tell you about this build:
+
+- **Timing.** `star_centroid` runs on `cam_pclk` here, which the XDC constrains
+  at 25 MHz like the bench's pixel clock. It meets with 7.9 ns to spare - far
+  more than the bench's 1.7 to 3.3, because with the field-of-view mask off
+  the scroll-to-seed chain that limits the bench is not there. 8082 LUTs, 27
+  block RAM tiles, no critical warnings. The slow presets only make it easier.
+- **The marker's list read is asynchronous.** The star list is written on
+  `cam_pclk` and read on `clk_pix`. The published bank is static for a whole
+  camera frame, so the read is safe except for the cycle the bank flips - one
+  wrong marker pixel, once a frame. If crosses ever flicker or tear, that is
+  where to look.

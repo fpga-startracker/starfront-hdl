@@ -10,7 +10,8 @@
 #
 # Variants:
 #   bringup   camera bring-up only, milestones M0-M4
-#   tracker   the above plus the streaming star detector, M5
+#   tracker   the above plus the sub-pixel centroiding pipeline on the live
+#             camera and the star-field sensor profile, M7
 #   bench     no camera: replays stored star fields through the centroiding
 #             pipeline and draws the result. Reads build/frames.mem, which
 #             bench/prepare_frames.py writes - run that first, or the bitstream

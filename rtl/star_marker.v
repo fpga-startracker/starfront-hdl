@@ -25,10 +25,14 @@
 //============================================================================
 
 module star_marker #(
-    parameter integer CROP_X0 = 8,     // first binned column shown
+    parameter integer CROP_X0 = 8,     // first detector column shown
     parameter integer CROP_Y0 = 8,
-    parameter integer CROP_W  = 240,   // binned pixels shown, 2x on screen
+    parameter integer CROP_W  = 240,   // detector pixels shown
     parameter integer CROP_H  = 240,
+    parameter integer SCALE_SHIFT = 1, // screen = detector << this: 1 for the
+                                       // bench's 2x, 0 for the camera's 1:1
+    parameter integer CW      = 16,    // list entry width
+    parameter integer FRAC    = 8,     // of which fractional bits
     parameter integer ARM_IN  = 3,     // gap at the centre, screen pixels
     parameter integer ARM_OUT = 9,
     parameter integer H_ACTIVE = 640
@@ -39,10 +43,10 @@ module star_marker #(
     input  wire [9:0]  pixel_x,        // raster counter, 0 .. H_TOTAL-1
     input  wire [9:0]  pixel_y,
 
-    input  wire [6:0]  star_count,
-    output wire [5:0]  rd_addr,        // combinational read of the star list
-    input  wire [15:0] rd_x,           // binned coordinates, 8 fractional bits
-    input  wire [15:0] rd_y,
+    input  wire [6:0]    star_count,
+    output wire [5:0]    rd_addr,      // combinational read of the star list
+    input  wire [CW-1:0] rd_x,         // detector coordinates, FRAC fractional bits
+    input  wire [CW-1:0] rd_y,
 
     output wire        mark
 );
@@ -52,12 +56,14 @@ module star_marker #(
     // Screen position of a star: drop the fraction, shift the crop origin away,
     // double. The fraction is deliberately dropped - a marker is drawn on a
     // pixel grid and a quarter-pixel centroid has nowhere to go on it.
-    wire [7:0] bx = rd_x[15:8];
-    wire [7:0] by = rd_y[15:8];
+    wire [CW-FRAC-1:0] bx = rd_x[CW-1:FRAC];
+    wire [CW-FRAC-1:0] by = rd_y[CW-1:FRAC];
     wire       in_crop = (bx >= CROP_X0) && (bx < CROP_X0 + CROP_W) &&
                          (by >= CROP_Y0) && (by < CROP_Y0 + CROP_H);
-    wire [9:0] sx_scr = ({2'b0, bx} - CROP_X0) << 1;
-    wire [9:0] sy_scr = ({2'b0, by} - CROP_Y0) << 1;
+    wire [9:0] bx10 = bx;                 // zero-extended
+    wire [9:0] by10 = by;
+    wire [9:0] sx_scr = (bx10 - CROP_X0) << SCALE_SHIFT;
+    wire [9:0] sy_scr = (by10 - CROP_Y0) << SCALE_SHIFT;
 
     //------------------------------------------------------------------------
     // Walk the list during horizontal blanking, for the line about to start

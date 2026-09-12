@@ -58,6 +58,7 @@
 
 module bg_track #(
     parameter integer IMG_W       = 256,
+    parameter integer XW          = 8,    // column coordinate width
     parameter integer HALF        = 4,    // detector window half-width
     parameter integer BG_FRAC     = 6,    // fractional bits, code-domain followers
     parameter integer STEP_BG     = 8,
@@ -77,17 +78,20 @@ module bg_track #(
     input  wire        clk,
     input  wire        rst,
 
-    input  wire        in_valid,
-    input  wire [7:0]  in_x,
-    input  wire [7:0]  in_y,
-    input  wire [7:0]  in_code,
-    input  wire        in_fov,        // this pixel is inside the illuminated disc
+    input  wire          in_valid,
+    input  wire [XW-1:0] in_x,
+    input  wire [7:0]    in_code,
+    input  wire          in_fov,      // this pixel is inside the illuminated disc
 
     // Registered one cycle after in_valid, and aligned by construction with a
     // detector window whose centre is HALF rows and HALF columns behind.
     output reg  [7:0]  thr_seed,      // code a pixel must clear to start a cluster
     output reg  [7:0]  thr_grow,      // code a pixel must clear to join one
     output reg  [11:0] bg_lin,        // that column's background, linearised
+
+    // High while the reset sweep is re-priming the column RAM. The detector
+    // must not start a frame until this is low - see star_centroid.
+    output wire        sweeping,
 
     // For the status panel and the ILA
     output wire [7:0]  bg_code,
@@ -116,17 +120,17 @@ module bg_track #(
     // the previous run's sky across a reset - which on hardware means KEY1 does
     // not actually put the detector back where it started, and in simulation
     // means the second test in a run disagrees with a model that always starts
-    // cold. Two hundred and fifty-six cycles, and the first star cannot appear
-    // for eight rows.
-    reg [8:0] sweep = 9'd0;
-    wire      sweeping = ~sweep[8];
+    // cold. One cycle per column, and the first star cannot appear for eight
+    // rows.
+    reg  [XW:0] sweep = {(XW+1){1'b0}};
+    assign sweeping = (sweep < IMG_W);
 
     always @(posedge clk) begin
-        if (rst)          sweep <= 9'd0;
-        else if (sweeping) sweep <= sweep + 9'd1;
+        if (rst)           sweep <= {(XW+1){1'b0}};
+        else if (sweeping) sweep <= sweep + 1'b1;
     end
 
-    wire [7:0]     xb    = in_x - HALF[7:0];
+    wire [XW-1:0]  xb    = in_x - HALF[XW-1:0];
     wire [BGW-1:0] bg_a  = bgmem[in_x];
     wire [BGW-1:0] bg_b  = bgmem[xb];
     wire [7:0]     bga_i = bg_a[BGW-1:BG_FRAC];
@@ -136,7 +140,7 @@ module bg_track #(
 
     always @(posedge clk) begin
         if (sweeping)
-            bgmem[sweep[7:0]] <= {PRIME_BG[7:0], {BG_FRAC{1'b0}}};
+            bgmem[sweep[XW-1:0]] <= {PRIME_BG[7:0], {BG_FRAC{1'b0}}};
         else if (in_valid && in_fov)
             bgmem[in_x] <= bg_next;
     end

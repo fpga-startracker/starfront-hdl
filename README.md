@@ -19,7 +19,8 @@ of PL logic.
 | M3 | 94-register camera init + pixel stream geometry probe | **passed on hardware** |
 | M4 | 320×240 8-bit luminance frame buffer → live image on HDMI | **passed on hardware** in RGB565; gray build of 2026-09-12 not yet seen on the board |
 | M5 | Streaming star detection at the camera's full 640×480 | **passed on hardware** |
-| M6 | Sub-pixel centroiding, measured against a real star-field set | **RTL matches the model bit for bit; not yet run on the board** |
+| M6 | Sub-pixel centroiding, measured against a real star-field set | **passed on hardware** 2026-09-09, 0.477 px median over JTAG-streamed frames |
+| M7 | The centroiding pipeline on the live camera, with a star-field sensor profile | **RTL matches the model bit for bit at 640×480; not yet on the board** |
 
 **Camera bring-up is complete, and the star detector works.** As of 2026-09-04
 the board captures live video from an OV7670 on header J11 and displays it over
@@ -63,7 +64,7 @@ for demonstration without rebuilding it every time the star work moves.
 | Variant | Top | Contains |
 |---|---|---|
 | `bringup` | `top_starfront` | camera bring-up only, M0–M4 |
-| `tracker` | `top_starfront` | the above plus the streaming star detector, M5 |
+| `tracker` | `top_starfront` | the above plus the sub-pixel centroiding pipeline on the live camera and the star-field sensor profile, M7 (`ENABLE_STARS=2`; 1 gives the older M5 peak detector) |
 | `bench` | `top_starfront_bench` | no camera: replays stored star fields through the centroiding pipeline and draws the result |
 
 ```bash
@@ -170,7 +171,9 @@ done
 On the board: KEY1 resets, KEY2 held shows the status numbers over a live
 image, KEY3 toggles the sensor's test bars (a gray staircase - the picture is
 luminance only), KEY4 steps the sensor window, and KEY2 held + KEY4 swaps
-which byte of each YUV422 pair is taken as Y.
+which byte of each YUV422 pair is taken as Y. In the `tracker` build KEY3
+instead toggles the star-field sensor profile and KEY2 held + KEY3 steps its
+exposure/gain preset.
 
 Then follow [`docs/bringup_checklist.md`](docs/bringup_checklist.md) on the
 board, and wire the camera per

@@ -8,11 +8,18 @@ Nothing here is a tolerance: an integer pipeline either agrees or it has a bug.
 
 Three frames are fed for each case, because the background followers deliberately
 carry state across frame boundaries and only the settled state is representative.
-The model is run the same number of times against the same tracker state.
+The hardware ignores the first frame after reset by design - it starts at the
+first frame boundary once bg_track's reset sweep has finished - so the model is
+run one time fewer against the same tracker state, and the two must then agree
+on the last frame.
 
 A real DUST frame is used when STARFRONT_DATA points at the display set;
 otherwise a synthetic field stands in, so the test still runs on a machine that
 does not have the data.
+
+With STARFRONT_GEOM=cam the runner builds the DUT at the camera's 640x480 with
+the field-of-view mask off, and the synthetic frame is generated at that size
+with a flat sky - the model is shape-agnostic, so the same comparison holds.
 """
 import os
 import sys
@@ -25,26 +32,40 @@ from cocotb.triggers import FallingEdge, RisingEdge
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bench"))
 
-from starfront_model import (DEFAULT, IMG_H, IMG_W, TrackerState,  # noqa: E402
-                             bin_nxn, detect, load_png)
+from dataclasses import replace  # noqa: E402
 
-N_WARM = 3               # frames fed before the answer is taken
-TAIL = 200               # idle cycles after a frame, to drain the engine
+from starfront_model import (DEFAULT, TrackerState, bin_nxn,  # noqa: E402
+                             detect, load_png)
+
+CAM = os.getenv("STARFRONT_GEOM", "") == "cam"
+IMG_W, IMG_H = (640, 480) if CAM else (256, 256)
+PARAMS = replace(DEFAULT, fov_r=0, fov_cx=320, fov_cy=240) if CAM else DEFAULT
+
+N_WARM = 3                   # frames fed before the answer is taken; the
+                             # hardware skips the first (see above), so two
+                             # are tracked
+TAIL = 200                   # idle cycles after a frame, to drain the engine
 
 
 def synthetic_frame(seed: int = 7) -> np.ndarray:
     """A star field with the shape of a DUST frame: vignetted disc, sky noise,
-    a handful of stars with the sensor's leftward smear tail."""
+    a handful of stars with the sensor's leftward smear tail. At the camera
+    geometry the sky is flat and the field is not masked."""
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:IMG_H, 0:IMG_W]
-    r = np.hypot(xx - 128, yy - 128)
 
-    img = np.where(r <= 120, 84.0 - 0.11 * (xx - 8), 4.0)
-    img += rng.normal(0.0, 1.2, img.shape)
+    if CAM:
+        img = 22.0 + 0.01 * xx + rng.normal(0.0, 1.5, (IMG_H, IMG_W))
+        n_stars = 40
+    else:
+        r = np.hypot(xx - 128, yy - 128)
+        img = np.where(r <= 120, 84.0 - 0.11 * (xx - 8), 4.0)
+        img += rng.normal(0.0, 1.2, img.shape)
+        n_stars = 20
 
-    for _ in range(20):
-        sx = int(rng.integers(30, 226))
-        sy = int(rng.integers(30, 226))
+    for _ in range(n_stars):
+        sx = int(rng.integers(30, IMG_W - 30))
+        sy = int(rng.integers(30, IMG_H - 30))
         amp = float(rng.uniform(40, 160))
         for dy in range(-2, 3):
             for dx in range(-6, 3):
@@ -127,8 +148,8 @@ async def run_case(dut, code: np.ndarray, label: str):
     hw = await read_list(dut, n_hw)
 
     st = TrackerState()
-    for _ in range(N_WARM):
-        res = detect(code, DEFAULT, st)
+    for _ in range(N_WARM - 1):          # the hardware ignores the first frame
+        res = detect(code, PARAMS, st)
     sw = [(s.x_fix, s.y_fix, s.sum_i) for s in res.stars]
 
     dut._log.info(f"{label}: hardware {n_hw} stars ({dropped} dropped), "
@@ -155,7 +176,7 @@ async def test_synthetic_field(dut):
     await run_case(dut, synthetic_frame(), "synthetic")
 
 
-@cocotb.test(skip=os.getenv("STARFRONT_DATA") is None)
+@cocotb.test(skip=os.getenv("STARFRONT_DATA") is None or CAM)
 async def test_real_frame(dut):
     """A real DUST frame, if the display set is available."""
     code = real_frame()

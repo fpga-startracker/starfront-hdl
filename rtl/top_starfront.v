@@ -6,15 +6,19 @@
 //              PL-only: the Zynq PS is not instantiated, so the bitstream is
 //              loaded straight over JTAG.
 //
-//   ENABLE_STARS picks between two builds from one source tree:
+//   ENABLE_STARS picks between three builds from one source tree:
 //
 //     0  camera bring-up only. Clocking, HDMI, SCCB, camera init, the stream
 //        geometry probe and the live picture - milestones M0 to M4, and the
 //        thing to show when the question is "does the camera work".
-//     1  the above plus the streaming star detector (M5).
+//     1  the above plus the streaming peak detector of M5 (star_detect), which
+//        marks the brightest point. Hardware-proven on a torch in a dark room.
+//     2  the above with the sub-pixel centroiding pipeline from the bench
+//        (star_centroid) running on the live camera at its full 640x480, a
+//        cross on every star it lists, and the star-field register profile
+//        on KEY3 - milestone M7. The `tracker` build is this one.
 //
-//   scripts/build.sh builds either; they land as separate bitstreams so both
-//   stay available without rebuilding.
+//   scripts/build.sh builds any of them; they land as separate bitstreams.
 //
 //   Milestones in this build:
 //     M1  50 MHz PL_GCLK -> MMCM -> 25 MHz pixel + 125 MHz serial, DVI out on
@@ -28,12 +32,19 @@
 //         sensor's own luminance instead of one approximated from colour.
 //     M5  streaming star detection at the camera's full 640x480, with no frame
 //         buffer at all - see star_detect.v for why that is the right shape
+//     M7  star_centroid on the camera: per-column background, 9x9 region
+//         growing, centre of gravity to 1/256 pixel, up to 64 stars a frame,
+//         and a sensor profile with exposure, gain, gamma and the de-noise
+//         blocks set for stars rather than for a pleasant picture
 //
 //   Controls:
 //     KEY1  reset
 //     KEY2  hold to force the status overlay while a live image is showing
 //     KEY3  toggle the sensor's built-in 8-bar test pattern - a descending
-//           gray staircase in Y, white on the left to black on the right
+//           gray staircase in Y, white on the left to black on the right.
+//           In the M7 build KEY3 instead toggles the star-field register
+//           profile (astro), and KEY2 held + KEY3 steps its exposure/gain
+//           preset 0-3; both show on the overlay's row 0, see below.
 //     KEY4  step the horizontal window position, 0-3, shown on the overlay.
 //           Use it if the picture has a band of junk down one edge: that is
 //           the sensor's window sitting over its dummy columns, and no amount
@@ -148,19 +159,33 @@ module top_starfront #(
     // sensor for Y first, but the sensor's own default is Y second and the two
     // are one bit apart in TSLB, so the choice is made reversible on the bench
     // rather than being trusted to a datasheet reading.
+    //
+    // In the M7 build KEY3 is the star-field profile: a press toggles astro,
+    // and a press with KEY2 held steps the exposure/gain preset. The consumer
+    // profile is the power-up default so the first picture is a recognisable
+    // one; astro is what to switch to once the lens is pointed at the sky.
+    // The bring-up builds keep KEY3 as the test-pattern key.
     localparam [1:0] HSTART_DEFAULT = 2'd1;
     localparam       Y_SECOND_DEFAULT = 1'b0;
+    localparam       ASTRO_KEYS = (ENABLE_STARS == 2);
 
     reg [1:0] hstart_sel = HSTART_DEFAULT;
     reg       y_second   = Y_SECOND_DEFAULT;
+    reg       astro      = 1'b0;
+    reg [1:0] preset     = 2'd0;
+    reg       key3_prev  = 1'b0;
     reg       key4_prev  = 1'b0;
 
     always @(posedge clk_pix) begin
         if (rst_pix) begin
             hstart_sel <= HSTART_DEFAULT;
             y_second   <= Y_SECOND_DEFAULT;
+            astro      <= 1'b0;
+            preset     <= 2'd0;
+            key3_prev  <= 1'b0;
             key4_prev  <= 1'b0;
         end else begin
+            key3_prev <= key3_pressed;
             key4_prev <= key4_pressed;
             if (key4_pressed && !key4_prev) begin
                 if (key2_pressed)
@@ -168,8 +193,16 @@ module top_starfront #(
                 else
                     hstart_sel <= hstart_sel + 2'd1;
             end
+            if (ASTRO_KEYS && key3_pressed && !key3_prev) begin
+                if (key2_pressed)
+                    preset <= preset + 2'd1;
+                else
+                    astro  <= ~astro;
+            end
         end
     end
+
+    wire color_bar_in = ASTRO_KEYS ? 1'b0 : key3_pressed;
 
     //------------------------------------------------------------------------
     // Camera clock and power sequencing
@@ -285,8 +318,10 @@ module top_starfront #(
     ov7670_init #(.CLK_FREQ(PIX_FREQ)) u_ov7670_init (
         .clk           ( clk_pix       ),
         .rst           ( rst_pix | ~probe_locked ),   // held until the bus is ours
-        .color_bar     ( key3_pressed  ),
+        .color_bar     ( color_bar_in  ),
         .hstart_sel    ( hstart_sel    ),
+        .astro         ( astro         ),
+        .preset        ( preset        ),
         .init_done     ( init_done     ),
         .sccb_start    ( init_start    ),
         .sccb_sub_addr ( init_sub_addr ),
@@ -332,9 +367,18 @@ module top_starfront #(
     //------------------------------------------------------------------------
     wire [7:0] star_count_s, star_thresh_s, star_max_s;
     wire [9:0] bright_x_s, bright_y_s;
+    wire [31:0] row3_s;                 // the overlay's fourth row, per build
+
+    // M7 star list, read by the marker in the pixel domain. The published
+    // bank is static for a whole camera frame, so an asynchronous read of it
+    // is safe except for the cycle the bank flips - one wrong marker pixel,
+    // once a frame, in a place the eye cannot find.
+    wire [5:0]  m7_rd_addr;
+    wire [17:0] m7_rd_x, m7_rd_y;
+    wire [6:0]  m7_count_x;
 
     generate
-    if (ENABLE_STARS != 0) begin : g_stars
+    if (ENABLE_STARS == 1) begin : g_stars
 
         wire        pix_valid;
         wire [9:0]  pix_x, pix_y;
@@ -414,6 +458,133 @@ module top_starfront #(
         assign star_max_s    = max_r;
         assign bright_x_s    = bx_r;
         assign bright_y_s    = by_r;
+        // stars found, detection threshold, brightest pixel in the frame
+        assign row3_s        = {count_r, thresh_r, max_r, 8'h00};
+
+        assign m7_rd_x       = 18'd0;
+        assign m7_rd_y       = 18'd0;
+        assign m7_count_x    = 7'd0;
+
+    end else if (ENABLE_STARS == 2) begin : g_astro
+
+        wire        pix_valid;
+        wire [9:0]  pix_x, pix_y;
+        wire [7:0]  pix_luma;
+        wire        cam_frame_start;
+
+        cam_pixel_stream u_pixel_stream (
+            .pclk        ( cam_pclk        ),
+            .href        ( ov7670_href     ),
+            .vsync       ( ov7670_vsync    ),
+            .data        ( ov7670_data     ),
+            .y_second    ( y_second_p      ),
+            .pix_valid   ( pix_valid       ),
+            .pix_x       ( pix_x           ),
+            .pix_y       ( pix_y           ),
+            .pix_luma    ( pix_luma        ),
+            .frame_start ( cam_frame_start )
+        );
+
+        // Reset into the camera domain. Every register in the detector has a
+        // power-up value, so this only matters for KEY1 - and it cannot land
+        // while the camera is not clocking, which is also when it cannot matter.
+        wire rst_cam;
+        cdc_sync #(.WIDTH(1)) u_sy_rst (.clk(cam_pclk), .din(rst_pix), .dout(rst_cam));
+
+        wire [6:0]  count_p, drop_p;
+        wire [7:0]  bg_p, thr_p;
+        wire [13:0] mad_p;
+        wire [17:0] best_x_p, best_y_p;
+        wire [19:0] best_sum_p;
+        wire [15:0] fcnt_p;
+
+        // The bench's detector, at the camera's geometry: 640x480, no binning,
+        // and no field-of-view mask - the lens is whatever is on the sensor.
+        star_centroid #(
+            .IMG_W(640), .IMG_H(480), .XW(10), .YW(9), .CW(18),
+            .FOV_CX(320), .FOV_CY(240), .FOV_R(0)
+        ) u_det (
+            .clk           ( cam_pclk        ),
+            .rst           ( rst_cam         ),
+            .in_valid      ( pix_valid       ),
+            .in_x          ( pix_x           ),
+            .in_y          ( pix_y[8:0]      ),
+            .in_code       ( pix_luma        ),
+            .frame_start   ( cam_frame_start ),
+            .fov_ox        ( 6'sd0           ),
+            .fov_oy        ( 6'sd0           ),
+            .star_count    ( count_p         ),
+            .dropped       ( drop_p          ),
+            .overflow      (                 ),
+            .best_x        ( best_x_p        ),
+            .best_y        ( best_y_p        ),
+            .best_sum      ( best_sum_p      ),
+            .frame_count   ( fcnt_p          ),
+            .rd_addr       ( m7_rd_addr      ),
+            .rd_x          ( m7_rd_x         ),
+            .rd_y          ( m7_rd_y         ),
+            .rd_sum        (                 ),
+            .rd_npx        (                 ),
+            .rd2_addr      ( 6'd0            ),
+            .rd2_x         (                 ),
+            .rd2_y         (                 ),
+            .rd2_sum       (                 ),
+            .rd2_npx       (                 ),
+            .bg_code       ( bg_p            ),
+            .thr_grow_code ( thr_p           ),
+            .mad_acc       ( mad_p           )
+        );
+
+        // Per-frame numbers for the overlay cross on the toggle handshake the
+        // M5 path uses. The background and threshold change every column, so
+        // they are snapshotted at the frame boundary first; the toggle flips
+        // one cycle after everything behind it has settled.
+        reg [7:0] bg_snap = 8'd0, thr_snap = 8'd0;
+        reg       fs_d    = 1'b0;
+        reg       tog_p   = 1'b0;
+
+        always @(posedge cam_pclk) begin
+            fs_d <= cam_frame_start;
+            if (cam_frame_start) begin
+                bg_snap  <= bg_p;
+                thr_snap <= thr_p;
+            end
+            if (fs_d)
+                tog_p <= ~tog_p;
+        end
+
+        wire       tog_x;
+        wire [6:0] count_x, drop_x;
+        wire [7:0] bg_x, thr_x;
+
+        cdc_sync #(.WIDTH(1)) u_sy_tog (.clk(clk_pix), .din(tog_p),    .dout(tog_x));
+        cdc_sync #(.WIDTH(7)) u_sy_cnt (.clk(clk_pix), .din(count_p),  .dout(count_x));
+        cdc_sync #(.WIDTH(7)) u_sy_drp (.clk(clk_pix), .din(drop_p),   .dout(drop_x));
+        cdc_sync #(.WIDTH(8)) u_sy_bg  (.clk(clk_pix), .din(bg_snap),  .dout(bg_x));
+        cdc_sync #(.WIDTH(8)) u_sy_thr (.clk(clk_pix), .din(thr_snap), .dout(thr_x));
+
+        reg [6:0] count_r = 7'd0, drop_r = 7'd0;
+        reg [7:0] bg_r    = 8'd0, thr_r  = 8'd0;
+        reg       tog_d   = 1'b0;
+
+        always @(posedge clk_pix) begin
+            tog_d <= tog_x;
+            if (tog_x != tog_d) begin
+                count_r <= count_x;
+                drop_r  <= drop_x;
+                bg_r    <= bg_x;
+                thr_r   <= thr_x;
+            end
+        end
+
+        assign m7_count_x    = count_r;
+        assign star_count_s  = {1'b0, count_r};
+        assign star_thresh_s = thr_r;
+        assign star_max_s    = bg_r;
+        assign bright_x_s    = 10'd0;
+        assign bright_y_s    = 10'd0;
+        // stars listed, grow threshold, background, seeds dropped
+        assign row3_s        = {1'b0, count_r, thr_r, bg_r, 1'b0, drop_r};
 
     end else begin : g_no_stars
 
@@ -422,6 +593,10 @@ module top_starfront #(
         assign star_max_s    = 8'd0;
         assign bright_x_s    = 10'd0;
         assign bright_y_s    = 10'd0;
+        assign row3_s        = 32'd0;
+        assign m7_rd_x       = 18'd0;
+        assign m7_rd_y       = 18'd0;
+        assign m7_count_x    = 7'd0;
 
     end
     endgenerate
@@ -542,13 +717,14 @@ module top_starfront #(
         .pixel_y      ( vga_pixel_y    ),
         .active       ( vga_active     ),
         .frame_tick   ( vga_frame_tick ),
-        // digits: PID VER, then the window selection (+4 when the Y byte is
-        // swapped), then the register read-back
-        .row0         ( {cam_pid, cam_ver, 5'b0, y_second, hstart_sel, cam_readback} ),
+        // digits: PID VER, then {astro, preset, 0, 0, y_second, hstart_sel}
+        // as two hex digits, then the register read-back. 01 is the consumer
+        // profile with the default window; 81/A1/C1/E1 are astro presets 0-3;
+        // +4 on the low digit means the Y byte is swapped.
+        .row0         ( {cam_pid, cam_ver, astro, preset, 2'b0, y_second, hstart_sel, cam_readback} ),
         .row1         ( {bytes_per_line, lines_per_frame}       ),
         .row2         ( {8'h00, pclk_freq_100k, 8'h00, frames_per_sec} ),
-        // stars found, detection threshold, brightest pixel in the frame
-        .row3         ( {star_count_s, star_thresh_s, star_max_s, 8'h00} ),
+        .row3         ( row3_s ),
         .row3_en      ( ENABLE_STARS != 0 ),
         .row4_bits    ( {cam_id_ok, cam_rw_ok, init_done, stream_ok,
                          data_alive, href_alive, vsync_alive, pclk_alive} ),
@@ -569,21 +745,52 @@ module top_starfront #(
     wire show_overlay = key2_pressed | ~init_done;
 
     //------------------------------------------------------------------------
-    // Crosshair on the brightest star. The detector works in the camera's
-    // 640x480 coordinates and the screen is 640x480, so the position needs no
-    // scaling - a 320x240 buffer pixel-doubled lands exactly on it.
-    //
-    // The middle of the cross is left open so the star itself stays visible.
-    // It is drawn in red, which is the only colour on a gray picture.
+    // Markers. The detectors work in the camera's 640x480 coordinates and the
+    // screen is 640x480, so a position needs no scaling - a 320x240 buffer
+    // pixel-doubled lands exactly on it. M5 draws one cross on the brightest
+    // point; M7 draws one on every star in the list, with the same list
+    // walker the bench uses. The middle of a cross is left open so the star
+    // itself stays visible, and it is red, the only colour on a gray picture.
     //------------------------------------------------------------------------
-    wire [9:0] mark_dx = (pixel_x_d > bright_x_s) ? (pixel_x_d - bright_x_s)
-                                                  : (bright_x_s - pixel_x_d);
-    wire [9:0] mark_dy = (pixel_y_d > bright_y_s) ? (pixel_y_d - bright_y_s)
-                                                  : (bright_y_s - pixel_y_d);
+    wire show_mark;
 
-    wire mark_arm_h = (mark_dy == 10'd0) && (mark_dx >= 10'd4) && (mark_dx <= 10'd12);
-    wire mark_arm_v = (mark_dx == 10'd0) && (mark_dy >= 10'd4) && (mark_dy <= 10'd12);
-    wire show_mark  = (star_count_s != 8'd0) && (mark_arm_h || mark_arm_v);
+    generate
+    if (ENABLE_STARS == 1) begin : g_mark5
+
+        wire [9:0] mark_dx = (pixel_x_d > bright_x_s) ? (pixel_x_d - bright_x_s)
+                                                      : (bright_x_s - pixel_x_d);
+        wire [9:0] mark_dy = (pixel_y_d > bright_y_s) ? (pixel_y_d - bright_y_s)
+                                                      : (bright_y_s - pixel_y_d);
+
+        wire mark_arm_h = (mark_dy == 10'd0) && (mark_dx >= 10'd4) && (mark_dx <= 10'd12);
+        wire mark_arm_v = (mark_dx == 10'd0) && (mark_dy >= 10'd4) && (mark_dy <= 10'd12);
+        assign show_mark  = (star_count_s != 8'd0) && (mark_arm_h || mark_arm_v);
+        assign m7_rd_addr = 6'd0;
+
+    end else if (ENABLE_STARS == 2) begin : g_mark7
+
+        star_marker #(
+            .CROP_X0(0), .CROP_Y0(0), .CROP_W(640), .CROP_H(480),
+            .SCALE_SHIFT(0), .CW(18), .FRAC(8)
+        ) u_mark (
+            .clk        ( clk_pix    ),
+            .rst        ( rst_pix    ),
+            .pixel_x    ( pixel_x_d  ),
+            .pixel_y    ( pixel_y_d  ),
+            .star_count ( m7_count_x ),
+            .rd_addr    ( m7_rd_addr ),
+            .rd_x       ( m7_rd_x    ),
+            .rd_y       ( m7_rd_y    ),
+            .mark       ( show_mark  )
+        );
+
+    end else begin : g_mark0
+
+        assign show_mark  = 1'b0;
+        assign m7_rd_addr = 6'd0;
+
+    end
+    endgenerate
 
     wire [7:0] src_r = show_overlay ? ovl_r_d : img_r;
     wire [7:0] src_g = show_overlay ? ovl_g_d : img_g;

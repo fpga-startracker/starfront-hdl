@@ -4,6 +4,10 @@
 
 Set STARFRONT_DATA to point at a DUST_display_set directory to run the real
 frames as well; without it only the synthetic tests run.
+
+Set STARFRONT_GEOM=cam to build the detector the way the camera variant does -
+640x480, 10/9-bit coordinates, 18-bit list entries, no field-of-view mask - and
+run the synthetic test at that size. The DUST frame test does not apply there.
 """
 
 import os
@@ -19,8 +23,13 @@ def test_centroid_runner():
     sim = os.getenv("SIM", "icarus")
     rtl = Path(__file__).resolve().parent.parent.parent / "rtl"
 
+    cam = os.getenv("STARFRONT_GEOM", "") == "cam"
+    params = ({"IMG_W": 640, "IMG_H": 480, "XW": 10, "YW": 9, "CW": 18,
+               "FOV_R": 0, "FOV_CX": 320, "FOV_CY": 240} if cam else {})
+
     runner = get_runner(sim)
     runner.build(
+        parameters=params,
         sources=[
             rtl / "pix_lut.v",
             rtl / "line_buffer.v",

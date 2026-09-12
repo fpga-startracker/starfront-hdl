@@ -6,7 +6,10 @@
 #     mode      ""       create the project only
 #               impl     also synthesise, implement and write the bitstream
 #     variant   bringup  camera bring-up only (M0-M4), ENABLE_STARS = 0
-#               tracker  bring-up plus the streaming star detector (M5)
+#               tracker  bring-up plus the sub-pixel centroiding pipeline on
+#                        the live camera and the star-field sensor profile
+#                        (M7), ENABLE_STARS = 2. ENABLE_STARS = 1 is the older
+#                        M5 peak detector, still buildable by editing this.
 #               bench    no camera: replays stored star fields through the
 #                        centroiding pipeline, a different top and XDC
 #
@@ -46,7 +49,7 @@ switch -- $variant {
     tracker {
         set top_name  "top_starfront"
         set xdc_file  "ax7010_starfront.xdc"
-        set generics  "ENABLE_STARS=1"
+        set generics  "ENABLE_STARS=2"
     }
     bench {
         set top_name  "top_starfront_bench"

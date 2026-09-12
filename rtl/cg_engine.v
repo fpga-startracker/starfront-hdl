@@ -46,6 +46,9 @@ module cg_engine #(
     parameter integer HALF    = 4,
     parameter integer PIXW    = 12,
     parameter integer FRAC    = 8,
+    parameter integer XW      = 8,      // integer coordinate widths
+    parameter integer YW      = 8,
+    parameter integer CW      = 16,     // fixed-point result width, >= max(XW,YW)+FRAC
     parameter integer CG_HALF = 0,      // 0 = weight the grown region
     parameter integer MIN_NPX = 4,
     parameter integer MIN_SUM = 256
@@ -58,13 +61,13 @@ module cg_engine #(
     input  wire [WIN*WIN*PIXW-1:0]    win,     // linear pixels, index r*WIN + c
     input  wire [WIN*WIN-1:0]         reg_in,  // the grown region, from region_grow
     input  wire [PIXW-1:0]            bg,      // linear background under the weights
-    input  wire [7:0]                 x0,      // window's top left, absolute
-    input  wire [7:0]                 y0,
+    input  wire [XW-1:0]              x0,      // window's top left, absolute
+    input  wire [YW-1:0]              y0,
 
-    output reg         busy,
-    output reg         out_valid,
-    output reg  [15:0] out_x,       // absolute, FRAC fractional bits
-    output reg  [15:0] out_y,
+    output reg           busy,
+    output reg           out_valid,
+    output reg  [CW-1:0] out_x,     // absolute, FRAC fractional bits
+    output reg  [CW-1:0] out_y,
     output reg  [18:0] out_sum,     // background-subtracted flux
     output reg  [6:0]  out_npx,     // pixels in the grown region
     output reg         out_reject   // failed the quality gate; no star emitted
@@ -82,7 +85,8 @@ module cg_engine #(
     reg [PIXW-1:0] w [0:NPIX-1];
     reg [NPIX-1:0] region;
     reg [PIXW-1:0] bg_r;
-    reg [7:0]      x0_r, y0_r;
+    reg [XW-1:0]   x0_r;
+    reg [YW-1:0]   y0_r;
 
     integer i, r, c;
 
@@ -183,7 +187,8 @@ module cg_engine #(
     reg [18:0] hold_i;
     reg [21:0] hold_x, hold_y;
     reg [6:0]  hold_npx;
-    reg [7:0]  hold_x0, hold_y0;
+    reg [XW-1:0] hold_x0;
+    reg [YW-1:0] hold_y0;
 
     wire hold_take;      // the divider is loading from the hold this cycle
 
@@ -191,7 +196,8 @@ module cg_engine #(
         input [18:0] hi;
         input [21:0] hx, hy;
         input [6:0]  hn;
-        input [7:0]  hx0, hy0;
+        input [XW-1:0] hx0;
+        input [YW-1:0] hy0;
         begin
             hold_i   <= hi;
             hold_x   <= hx;
@@ -317,7 +323,8 @@ module cg_engine #(
     reg [QW-1:0] qx, qy;
     reg [18:0]   den;
     reg [6:0]    npx_d;
-    reg [7:0]    x0_d, y0_d;
+    reg [XW-1:0] x0_d;
+    reg [YW-1:0] y0_d;
     reg [4:0]    dcnt = 5'd0;
     reg          drun = 1'b0;
 
@@ -333,6 +340,14 @@ module cg_engine #(
 
     wire [QW:0] qx_round = {1'b0, qx} + 1'b1;
     wire [QW:0] qy_round = {1'b0, qy} + 1'b1;
+
+    // Window origin in the result's fixed point. Assigning the concatenation
+    // to the wider wire zero-extends it, which a replication of (CW-XW-FRAC)
+    // could not do when that count is zero.
+    wire [CW-1:0] xbase = {x0_d, {FRAC{1'b0}}};
+    wire [CW-1:0] ybase = {y0_d, {FRAC{1'b0}}};
+    wire [CW-1:0] xfrac = qx_round[QW:1];
+    wire [CW-1:0] yfrac = qy_round[QW:1];
 
     always @(posedge clk) begin
         out_valid <= 1'b0;
@@ -364,8 +379,8 @@ module cg_engine #(
             qy   <= {qy[QW-2:0], takey};
             dcnt <= dcnt + 5'd1;
         end else begin
-            out_x     <= {x0_d, {FRAC{1'b0}}} + {{(16-QW){1'b0}}, qx_round[QW:1]};
-            out_y     <= {y0_d, {FRAC{1'b0}}} + {{(16-QW){1'b0}}, qy_round[QW:1]};
+            out_x     <= xbase + xfrac;
+            out_y     <= ybase + yfrac;
             out_sum   <= den;
             out_npx   <= npx_d;
             out_valid <= 1'b1;

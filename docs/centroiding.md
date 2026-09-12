@@ -300,7 +300,15 @@ Three layers, because no single tool covers it:
 - `sim/centroid` drives the RTL with the same pixels and demands the same star
   list: identical count, identical fixed-point coordinates, identical flux.
   Nothing there is a tolerance. It runs a synthetic field always and a real DUST
-  frame when `STARFRONT_DATA` points at the display set.
+  frame when `STARFRONT_DATA` points at the display set; with
+  `STARFRONT_GEOM=cam` it builds the detector at the camera's 640x480 instead
+  and runs the synthetic field at that size. One thing it pinned down that the
+  bench never could: the hardware ignores the first frame after reset, on
+  purpose, because `bg_track` spends one cycle per column re-priming its RAM
+  after reset and a frame that started inside that sweep would have its first
+  row tracked by the model and not by the hardware. The bench's mask hid it -
+  row 0 is outside the illuminated disc - and the unmasked camera geometry
+  found it on the third star.
 - The `bench` bitstream runs the same RTL on the board at 24 frames a second and
   draws what it found.
 - `bench/score_hardware.py` scores the star lists the board reports over JTAG
@@ -325,11 +333,12 @@ path, the DVI transmitter and the ILA. 7z010: 17 600 LUT, 35 200 FF, 60 BRAM36,
 | block RAM | 37.5 | 62 |
 | DSP | 2 | 2.5 |
 
-WNS +1.725 ns on the 25 MHz pixel clock, all constraints met, zero failing
-endpoints - but that is 38.3 ns of a 40 ns period, so **Fmax is about 26 MHz and
-the margin is 4%**, where `bringup` has 12.6 ns of slack on the same clock. (It
-was +3.6 ns before the linearised column background; the worst path did not
-change, the placement did.) That path runs from the scroll offset register
+WNS between +1.7 and +3.3 ns on the 25 MHz pixel clock across recent builds
+of the same logic, all constraints met, zero failing endpoints - but that is
+up to 38.3 ns of a 40 ns period, so **Fmax is about 26 MHz and the margin is
+4-8%**, where `bringup` has 12.6 ns of slack on the same clock and the M7
+`tracker`, which has no field-of-view mask, has 7.9. The worst path does not
+change between builds; the placement does. That path runs from the scroll offset register
 through the field-of-view mask into the seed decision, and from there through
 the capture cycle's two-column accumulate into the divider's hold register -
 38 ns, of which 22 is routing. It is the chain the detector deliberately buys
@@ -376,11 +385,12 @@ of them is more than a few kilobits and block RAM is what runs out on this part.
 - **More than one cluster in flight.** The engine holds one; a second seed
   within five columns is dropped and counted. It is zero on real frames now, but
   a denser field would need a queue.
-- **The camera path.** `star_centroid` takes a generic binned pixel stream,
-  and `cam_pixel_stream` now delivers the sensor's own 8-bit Y (YUV422, see
-  pitfall 11 in `docs/ov7670_notes.md`), which is the right input. Two things
-  stand in the way of just wiring them together: `star_centroid` and
-  `bin_nxn` carry 8-bit coordinates, so they stop at 256x256 where the camera
-  is 640x480; and the rest of the astro register profile - manual exposure,
-  linear gamma, denoise off - is still the consumer one. See the last section
-  of `docs/ov7670_notes.md`.
+- **The camera path** is built (M7, 2026-09-12): the `tracker` variant runs
+  this pipeline on the live camera at 640x480 with no binning and no
+  field-of-view mask, draws a cross on every listed star, and has the
+  star-field sensor profile on KEY3 - see the last section of
+  `docs/ov7670_notes.md` and M7 in `docs/bringup_checklist.md`. The
+  coordinate widths are parameters now (`XW`, `YW`, `CW`), the bench is
+  unchanged at 8/8/16, and the bit-exact simulation runs at both geometries.
+  What it has not had is a sky: the accuracy figures above are the DUST
+  frames', and the camera has only been argued to be their equivalent.

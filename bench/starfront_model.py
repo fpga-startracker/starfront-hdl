@@ -483,20 +483,21 @@ def _seed_mask(lin: np.ndarray, code: np.ndarray, thr_seed: np.ndarray,
     """
     from numpy.lib.stride_tricks import sliding_window_view
 
+    h, w = lin.shape
     v = sliding_window_view(lin, (WIN, WIN)).reshape(
-        IMG_H - WIN + 1, IMG_W - WIN + 1, WIN * WIN)
+        h - WIN + 1, w - WIN + 1, WIN * WIN)
     mid = WIN * WIN // 2
     centre = v[:, :, mid]
 
     before = (centre[:, :, None] > v[:, :, :mid]).all(axis=2)
     after = (centre[:, :, None] >= v[:, :, mid + 1:]).all(axis=2)
 
-    ok = np.zeros((IMG_H, IMG_W), dtype=bool)
-    ok[HALF:IMG_H - HALF, HALF:IMG_W - HALF] = before & after
+    ok = np.zeros((h, w), dtype=bool)
+    ok[HALF:h - HALF, HALF:w - HALF] = before & after
     ok &= code > thr_seed
 
     if p.fov_r > 0:
-        yy, xx = np.mgrid[0:IMG_H, 0:IMG_W]
+        yy, xx = np.mgrid[0:h, 0:w]
         ok &= ((xx - p.fov_cx) ** 2 + (yy - p.fov_cy) ** 2) <= p.fov_r ** 2
 
     return ok
@@ -513,16 +514,22 @@ def _at_window(img: np.ndarray, dy: int, dx: int) -> np.ndarray:
     moment. Rows past the bottom edge clamp, which only affects centres that the
     seed mask has already excluded.
     """
+    h, w = img.shape
     out = np.zeros_like(img)
-    ys = np.clip(np.arange(IMG_H) + dy, 0, IMG_H - 1)
-    xs = np.clip(np.arange(IMG_W) + dx, 0, IMG_W - 1)
+    ys = np.clip(np.arange(h) + dy, 0, h - 1)
+    xs = np.clip(np.arange(w) + dx, 0, w - 1)
     out[:, :] = img[np.ix_(ys, xs)]
     return out
 
 
 def detect(code: np.ndarray, p: Params = DEFAULT,
            st: TrackerState | None = None) -> FrameResult:
-    """Run one binned 256x256 frame of 8-bit codes through the pipeline."""
+    """Run one frame of 8-bit codes through the pipeline.
+
+    The frame can be any size: the bench's binned 256x256 DUST grid, or the
+    camera's 640x480 luminance with `fov_r = 0`. Everything that follows takes
+    its geometry from the array.
+    """
     if st is None:
         st = TrackerState()
 
