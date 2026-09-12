@@ -1,7 +1,9 @@
 #=============================================================================
 # program.tcl - load the bitstream onto the AX7010 over the on-board USB JTAG
 #
-#   vivado -mode batch -source scripts/program.tcl
+#   vivado -mode batch -source scripts/program.tcl -tclargs <variant>
+#
+#     variant   bringup | tracker | bench   (default bringup)
 #
 # Equivalent to Hardware Manager -> Auto Connect -> Program Device, but without
 # any clicking. The ILA probe file is attached at the same time, so opening the
@@ -14,20 +16,41 @@
 set script_dir [file dirname [file normalize [info script]]]
 set repo_dir   [file dirname $script_dir]
 set build_dir  "$repo_dir/build"
-set run_dir    "$build_dir/starfront_bringup/starfront_bringup.runs/impl_1"
+
+# The variant used to be hard-coded here, from before there was more than one.
+# program.sh had been passing it for a while and this file had been ignoring it,
+# so every `program.sh tracker` and `program.sh bench` quietly loaded the
+# bring-up bitstream - which looks exactly like a variant that does not work,
+# and cost an afternoon before anyone read the line it prints at the end.
+set variant "bringup"
+if {[llength $argv] > 0 && [string length [lindex $argv 0]] > 0} {
+    set variant [lindex $argv 0]
+}
+
+switch -- $variant {
+    bringup -
+    tracker { set top_name "top_starfront" }
+    bench   { set top_name "top_starfront_bench" }
+    default { error "ERROR: unknown variant '$variant' - expected bringup, tracker or bench" }
+}
+
+set proj_name "starfront_$variant"
+set run_dir   "$build_dir/$proj_name/$proj_name.runs/impl_1"
 
 # Prefer the copies in build/, which survive a `create_project -force`; fall
 # back to the run directory for a project that has just been built in place.
-set bit_file "$build_dir/starfront_bringup.bit"
-set ltx_file "$build_dir/starfront_bringup.ltx"
+set bit_file "$build_dir/$proj_name.bit"
+set ltx_file "$build_dir/$proj_name.ltx"
 
 if {![file exists $bit_file]} {
-    set bit_file "$run_dir/top_starfront_bringup.bit"
-    set ltx_file "$run_dir/top_starfront_bringup.ltx"
+    set bit_file "$run_dir/$top_name.bit"
+    set ltx_file "$run_dir/$top_name.ltx"
 }
 
+puts "INFO: variant $variant"
+
 if {![file exists $bit_file]} {
-    error "ERROR: no bitstream found - run ./scripts/build.sh impl first"
+    error "ERROR: no bitstream for $variant - run ./scripts/build.sh impl $variant"
 }
 
 open_hw_manager
