@@ -14,16 +14,30 @@
 set script_dir [file dirname [file normalize [info script]]]
 set repo_dir   [file dirname $script_dir]
 set build_dir  "$repo_dir/build"
-set run_dir    "$build_dir/starfront_bringup/starfront_bringup.runs/impl_1"
+
+set variant "tracker"
+if {[llength $argv] > 0 && [string length [lindex $argv 0]] > 0} {
+    set variant [lindex $argv 0]
+}
+switch -- $variant {
+    bringup -
+    tracker {}
+    default {
+        error "ERROR: unknown variant '$variant' - expected bringup or tracker"
+    }
+}
+
+set proj_name "starfront_$variant"
+set run_dir    "$build_dir/$proj_name/$proj_name.runs/impl_1"
 
 # Prefer the copies in build/, which survive a `create_project -force`; fall
 # back to the run directory for a project that has just been built in place.
-set bit_file "$build_dir/starfront_bringup.bit"
-set ltx_file "$build_dir/starfront_bringup.ltx"
+set bit_file "$build_dir/${proj_name}.bit"
+set ltx_file "$build_dir/${proj_name}.ltx"
 
 if {![file exists $bit_file]} {
-    set bit_file "$run_dir/top_starfront_bringup.bit"
-    set ltx_file "$run_dir/top_starfront_bringup.ltx"
+    set bit_file "$run_dir/top_${proj_name}.bit"
+    set ltx_file "$run_dir/top_${proj_name}.ltx"
 }
 
 if {![file exists $bit_file]} {

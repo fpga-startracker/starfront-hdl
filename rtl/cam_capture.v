@@ -30,6 +30,7 @@ module cam_capture (
     input  wire        ov7670_href,
     input  wire        ov7670_vsync,
     input  wire [7:0]  ov7670_data,
+    input  wire        gray_mode,
 
     output reg         cap_wr_en  = 1'b0,
     output reg  [16:0] cap_addr   = 17'd0,
@@ -78,7 +79,14 @@ module cam_capture (
                     // Both bytes are fully registered by now, which is the
                     // whole point of the pipeline - reading the bus here
                     // instead is what produced rainbow noise on the Basys 3.
-                    cap_data  <= { byte1_reg, byte2_reg };   // RGB565
+                    if (gray_mode) begin
+                        // In the grayscale YUV422 mode the sensor delivers a Y
+                        // byte for each pixel; we keep the brightness and map it
+                        // back into the existing RGB565 framebuffer space.
+                        cap_data <= {byte1_reg[7:3], byte1_reg[7:2], byte1_reg[7:3]};
+                    end else begin
+                        cap_data <= { byte1_reg, byte2_reg };   // RGB565
+                    end
                     cap_addr  <= pixel_addr;
                     cap_wr_en <= 1'b1;
                 end
