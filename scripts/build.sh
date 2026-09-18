@@ -9,7 +9,8 @@
 #
 # Variants:
 #   bringup   camera bring-up only, milestones M0-M4
-#   tracker   the above plus the streaming star detector, M5
+#   tracker   the above plus the streaming star detector, M5 (physical camera)
+#   sim       tracker with Zynq PS AXI-Stream simulator (physical camera disabled)
 #
 # Set VIVADO to override the tool path.
 #

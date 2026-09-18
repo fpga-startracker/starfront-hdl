@@ -234,3 +234,24 @@ If the image is wrong only in RGB565, work through pitfalls 2, 5 and 7 in
 `docs/ov7670_notes.md` — that is the ISP configuration, not the FPGA. If the
 image is wrong in both formats, the problem is in the capture path or the data
 bus wiring.
+
+## Camera emulator & host streaming bench test (`axis_cam_bridge`)
+
+For verifying the HDMI display and star detector algorithms indoors without
+needing the physical OV7670 camera hardware or a dark room setup:
+
+1. `rtl/axis_cam_bridge.v` translates an incoming AXI4-Stream byte stream (fed
+   from the Zynq ARM core via an AXI-Stream FIFO, AXI DMA, or UART) into
+   compliant OV7670 `pclk`, `href`, `vsync`, and `data` signals.
+2. The module buffers 1 scanline (1280 bytes) and bursts it out at 25 MHz with
+   standard horizontal blanking (~144 cycles), guaranteeing glitch-free timing.
+3. In grayscale mode (`gray_input = 1`), the host only needs to transmit 640
+   bytes/line (307.2 KB per full frame). The bridge automatically expands each
+   luminance byte into `{Y, 0x80}` on the output, halving serial transfer time.
+4. Frames are synchronized by a 4-byte magic sequence: `0xAA 0x55 0xAA 0x55`.
+
+To stream an image from a laptop (e.g. over serial or test generator):
+
+```bash
+uv run python scripts/send_image_stream.py --port COM3 --baud 921600 --synthetic
+```

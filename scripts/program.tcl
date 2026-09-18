@@ -21,9 +21,10 @@ if {[llength $argv] > 0 && [string length [lindex $argv 0]] > 0} {
 }
 switch -- $variant {
     bringup -
-    tracker {}
+    tracker -
+    sim {}
     default {
-        error "ERROR: unknown variant '$variant' - expected bringup or tracker"
+        error "ERROR: unknown variant '$variant' - expected bringup, tracker, or sim"
     }
 }
 

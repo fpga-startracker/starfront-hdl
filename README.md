@@ -57,9 +57,12 @@ for demonstration without rebuilding it every time the star work moves.
 
 # Run the simulations (Icarus Verilog + cocotb)
 uv sync
-for s in tmds sccb vga capture star; do
+for s in tmds sccb vga capture star bridge; do
   (cd sim/$s && ../../.venv/bin/python test_runner_$s.py)
 done
+
+# Stream a test image / synthetic star field from laptop to FPGA
+uv run python scripts/send_image_stream.py --port COM3 --baud 921600 --synthetic
 ```
 
 On the board: KEY1 resets, KEY2 held shows the status numbers over a live
@@ -67,6 +70,9 @@ image, KEY3 toggles the sensor between RGB565 and YUV422 grayscale output.
 The grayscale mode is the astro-friendly option: it keeps only luminance and is
 used when the detector wants one 8-bit brightness sample per pixel instead of a
 full 16-bit colour word.
+
+Images can also be streamed directly into the FPGA via `axis_cam_bridge` (from
+UART, Ethernet, or memory) without a camera connected.
 
 Then follow [`docs/bringup_checklist.md`](docs/bringup_checklist.md) on the
 board, and wire the camera per

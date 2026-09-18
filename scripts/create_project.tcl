@@ -35,15 +35,34 @@ if {[llength $argv] > 1 && [string length [lindex $argv 1]] > 0} {
     set variant [lindex $argv 1]
 }
 
+set enable_stars 1
+set has_ps 0
+set sim_cam_only 0
+
 switch -- $variant {
-    bringup { set enable_stars 0 }
-    tracker { set enable_stars 1 }
-    default { error "ERROR: unknown variant '$variant' - expected bringup or tracker" }
+    bringup {
+        set enable_stars 0
+        set has_ps 0
+        set sim_cam_only 0
+    }
+    tracker {
+        set enable_stars 1
+        set has_ps 0
+        set sim_cam_only 0
+    }
+    sim -
+    tracker_sim -
+    ps {
+        set enable_stars 1
+        set has_ps 1
+        set sim_cam_only 1
+    }
+    default { error "ERROR: unknown variant '$variant' - expected bringup, tracker, or sim" }
 }
 
 set proj_name "starfront_$variant"
 
-puts "INFO: variant $variant (ENABLE_STARS = $enable_stars)"
+puts "INFO: variant $variant (ENABLE_STARS = $enable_stars, HAS_PS = $has_ps, SIM_CAM_ONLY = $sim_cam_only)"
 
 file mkdir $build_dir
 
@@ -70,7 +89,15 @@ add_files -norecurse $rtl_files
 add_files -fileset constrs_1 -norecurse $repo_dir/constraints/ax7010_starfront.xdc
 
 set_property top $top_name [current_fileset]
-set_property generic "ENABLE_STARS=$enable_stars" [current_fileset]
+set_property generic [list ENABLE_STARS=$enable_stars SIM_CAM_ONLY=$sim_cam_only] [current_fileset]
+
+if {$has_ps} {
+    puts "INFO: Generating ax7010_PS block design from scripts/ax7010_ps_bd.tcl..."
+    source "$repo_dir/scripts/ax7010_ps_bd.tcl"
+    make_wrapper -files [get_files ax7010_PS.bd] -top -import
+} else {
+    set_property verilog_define [list NO_PS=1] [current_fileset]
+}
 
 set in_project {}
 foreach f [get_files -of_objects [get_filesets sources_1]] {
@@ -178,6 +205,12 @@ if {$run_impl} {
     if {[file exists "$run_dir/$top_name.ltx"]} {
         file copy -force "$run_dir/$top_name.ltx" "$build_dir/$proj_name.ltx"
         puts "INFO: ILA probes written to $build_dir/$proj_name.ltx"
+    }
+
+    if {$has_ps} {
+        file mkdir "$build_dir/ax7010_ps"
+        write_hw_platform -fixed -include_bit -force -file "$build_dir/ax7010_ps/ax7010_ps_wrapper.xsa"
+        puts "INFO: hardware platform exported to $build_dir/ax7010_ps/ax7010_ps_wrapper.xsa"
     }
 
     open_run impl_1

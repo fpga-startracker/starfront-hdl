@@ -32,7 +32,7 @@ uv sync                           # cocotb + numpy + pytest into .venv
 cd sim/<subsystem> && ../../.venv/bin/python test_runner_<subsystem>.py
 ```
 
-Simulation subsystems: `tmds`, `sccb`, `vga`, `capture`, `star`. Reports land in
+Simulation subsystems: `tmds`, `sccb`, `vga`, `capture`, `star`, `bridge`. Reports land in
 `build/starfront_<variant>_timing.rpt` and `..._utilization.rpt`.
 
 `build.sh` decides success from the `INFO: BUILD COMPLETE` marker, not the exit
@@ -59,7 +59,8 @@ These are the ones that repeatedly matter; the full tables are in
   chip, so `dvi_tx` does the 8b/10b encoding and the 10:1 serialisation itself.
   `hdmi_out_en` (V16) must be driven high or the sink gets no +5 V.
 - **No UART reachable from PL** — the USB serial port is on PS MIO. Debug goes
-  through `status_overlay` on the HDMI screen, four LEDs and an ILA.
+  through `status_overlay` on the HDMI screen, four LEDs and an ILA. Alternatively,
+  `axis_cam_bridge` allows feeding image streams from PS AXI-Stream into the PL.
 - **LEDs and keys are active low.**
 - The camera lives on **J11**, whose only MRCC pin in reach is **K17** — that is
   why PCLK is pinned there and must stay there.
@@ -76,12 +77,13 @@ top_starfront   (parameter ENABLE_STARS)
 │   └── ov7670_registers
 ├── cam_activity      coarse PCLK/HREF/VSYNC/data activity
 ├── cam_stream_probe  bytes/line, lines/frame, PCLK frequency, frames/sec
-├── cam_capture       RGB444 3-stage pipeline, 2:1 downsample to 320x240
-├── fb_mem            inferred dual-clock block RAM, 320x240 x 12 bit
-├── fb_reader         2x pixel doubling, RGB444 -> RGB888
+├── cam_capture       RGB565 3-stage pipeline, 2:1 downsample to 320x240
+├── fb_mem            inferred dual-clock block RAM, 320x240 x 16 bit
+├── fb_reader         2x pixel doubling, RGB565 -> RGB888
 ├── cam_pixel_stream  full 640x480 tap: one pixel per strobe + luminance   [M5]
 ├── star_detect       5x5 window, peak + centroid, adaptive threshold      [M5]
 │   └── line_buffer   x4, distributed RAM - no block RAM at all
+├── axis_cam_bridge   AXI4-Stream camera bridge (line-buffered burst emulator)
 ├── vga_sync_gen      640x480 @ 60 Hz timing, both sync polarities
 ├── status_overlay    hex digits via hex_font, plus a flag row of blocks
 ├── key_debounce      x2  KEY2 (overlay) and KEY3 (grayscale toggle)
