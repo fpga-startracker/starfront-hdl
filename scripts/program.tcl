@@ -3,7 +3,7 @@
 #
 #   vivado -mode batch -source scripts/program.tcl -tclargs <variant>
 #
-#     variant   bringup | tracker | bench   (default bringup)
+#     variant   bringup | tracker | stream | bench   (default bringup)
 #
 # Equivalent to Hardware Manager -> Auto Connect -> Program Device, but without
 # any clicking. The ILA probe file is attached at the same time, so opening the
@@ -27,11 +27,17 @@ if {[llength $argv] > 0 && [string length [lindex $argv 0]] > 0} {
     set variant [lindex $argv 0]
 }
 
+# Aliases fold onto the canonical name, the same way create_project.tcl does,
+# so that `program.sh sim` finds the project `build.sh stream` wrote.
 switch -- $variant {
+    sim -
+    tracker_sim -
+    ps      { set variant "stream"; set top_name "top_starfront" }
     bringup -
-    tracker { set top_name "top_starfront" }
+    tracker -
+    stream  { set top_name "top_starfront" }
     bench   { set top_name "top_starfront_bench" }
-    default { error "ERROR: unknown variant '$variant' - expected bringup, tracker or bench" }
+    default { error "ERROR: unknown variant '$variant' - expected bringup, tracker, stream or bench" }
 }
 
 set proj_name "starfront_$variant"

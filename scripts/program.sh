@@ -4,6 +4,7 @@
 #   ./scripts/program.sh              the tracker build
 #   ./scripts/program.sh bringup      camera bring-up only
 #   ./scripts/program.sh tracker
+#   ./scripts/program.sh stream       PS AXI-Stream build, no camera
 #   ./scripts/program.sh bench        centroiding bench, no camera
 #
 # Works from any directory: the repository is located from this script's own

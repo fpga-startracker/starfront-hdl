@@ -10,12 +10,15 @@
 #                        the live camera and the star-field sensor profile
 #                        (M7), ENABLE_STARS = 2. ENABLE_STARS = 1 is the older
 #                        M5 peak detector, still buildable by editing this.
+#               stream   no camera: the Zynq PS feeds frames in over
+#                        AXI4-Stream, ENABLE_STARS = 2, SIM_CAM_ONLY = 1.
+#                        Aliases: sim, tracker_sim, ps
 #               bench    no camera: replays stored star fields through the
 #                        centroiding pipeline, a different top and XDC
 #
 # Use scripts/build.sh rather than calling this directly.
 #
-# The two variants are separate projects and separate bitstreams built from one
+# The variants are separate projects and separate bitstreams built from one
 # source tree, so the plain camera bring-up stays available for demonstration
 # without rebuilding it every time the star work moves.
 #
@@ -39,17 +42,31 @@ if {[llength $argv] > 1 && [string length [lindex $argv 1]] > 0} {
     set variant [lindex $argv 1]
 }
 
-# Each variant is a top, a constraint file and a set of generics.
+# Each variant is a top, a constraint file, a set of generics, and whether the
+# Zynq PS block design is built. Aliases are folded onto one canonical name so
+# that two spellings cannot produce two build/ directories for one bitstream.
+set has_ps 0
+
 switch -- $variant {
     bringup {
         set top_name  "top_starfront"
         set xdc_file  "ax7010_starfront.xdc"
-        set generics  "ENABLE_STARS=0"
+        set generics  "ENABLE_STARS=0 SIM_CAM_ONLY=0"
     }
     tracker {
         set top_name  "top_starfront"
         set xdc_file  "ax7010_starfront.xdc"
-        set generics  "ENABLE_STARS=2"
+        set generics  "ENABLE_STARS=2 SIM_CAM_ONLY=0"
+    }
+    stream -
+    sim -
+    tracker_sim -
+    ps {
+        set variant   "stream"
+        set top_name  "top_starfront"
+        set xdc_file  "ax7010_starfront.xdc"
+        set generics  "ENABLE_STARS=2 SIM_CAM_ONLY=1"
+        set has_ps    1
     }
     bench {
         set top_name  "top_starfront_bench"
@@ -57,13 +74,14 @@ switch -- $variant {
         set generics  ""
     }
     default {
-        error "ERROR: unknown variant '$variant' - expected bringup, tracker or bench"
+        error "ERROR: unknown variant '$variant' - expected bringup, tracker, stream or bench"
     }
+}
 }
 
 set proj_name "starfront_$variant"
 
-puts "INFO: variant $variant (top $top_name, $xdc_file)"
+puts "INFO: variant $variant (top $top_name, $xdc_file, generics {$generics}, PS $has_ps)"
 
 file mkdir $build_dir
 
@@ -109,6 +127,18 @@ if {[string equal $variant "bench"]} {
 set_property top $top_name [current_fileset]
 if {[string length $generics] > 0} {
     set_property generic $generics [current_fileset]
+}
+
+# The PS is instantiated only by the stream variant. Every other build is
+# PL-only and compiles top_starfront with NO_PS defined, which stubs the
+# wrapper out - otherwise synthesis stops on a module it has no source for.
+if {$has_ps} {
+    puts "INFO: generating the ax7010_PS block design from scripts/ax7010_ps_bd.tcl"
+    source "$repo_dir/scripts/ax7010_ps_bd.tcl"
+    make_wrapper -files [get_files ax7010_PS.bd] -top -import
+} else {
+    set_property verilog_define [list NO_PS=1] [current_fileset]
+}
 }
 
 set in_project {}
@@ -239,6 +269,12 @@ if {$run_impl} {
     if {[file exists "$run_dir/$top_name.ltx"]} {
         file copy -force "$run_dir/$top_name.ltx" "$build_dir/$proj_name.ltx"
         puts "INFO: ILA probes written to $build_dir/$proj_name.ltx"
+    }
+
+    if {$has_ps} {
+        file mkdir "$build_dir/ax7010_ps"
+        write_hw_platform -fixed -include_bit -force -file "$build_dir/ax7010_ps/ax7010_ps_wrapper.xsa"
+        puts "INFO: hardware platform exported to $build_dir/ax7010_ps/ax7010_ps_wrapper.xsa"
     }
 
     open_run impl_1

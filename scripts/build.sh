@@ -5,13 +5,17 @@
 #   ./scripts/build.sh impl               build the tracker variant
 #   ./scripts/build.sh impl bringup       build the camera bring-up variant
 #   ./scripts/build.sh impl tracker       explicit
+#   ./scripts/build.sh impl stream        build the PS AXI-Stream variant
 #   ./scripts/build.sh impl bench         build the centroiding bench
-#   ./scripts/build.sh impl all           build all three, one after the other
+#   ./scripts/build.sh impl all           build all four, one after the other
 #
 # Variants:
 #   bringup   camera bring-up only, milestones M0-M4
 #   tracker   the above plus the sub-pixel centroiding pipeline on the live
 #             camera and the star-field sensor profile, M7
+#   stream    tracker with the Zynq PS instantiated, feeding frames in over
+#             AXI4-Stream with the camera powered down. This is the one to
+#             build to push images in from a host over Ethernet.
 #   bench     no camera: replays stored star fields through the centroiding
 #             pipeline and draws the result. Reads build/frames.mem, which
 #             bench/prepare_frames.py writes - run that first, or the bitstream
@@ -118,6 +122,7 @@ fi
 if [ "$VARIANT" = "all" ]; then
     build_one bringup
     build_one tracker
+    build_one stream
     build_one bench
 else
     build_one "$VARIANT"

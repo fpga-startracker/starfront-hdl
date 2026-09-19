@@ -444,3 +444,37 @@ Two things the bench cannot tell you about this build:
   camera frame, so the read is safe except for the cycle the bank flips - one
   wrong marker pixel, once a frame. If crosses ever flicker or tear, that is
   where to look.
+
+## Feeding frames in over AXI4-Stream, with no camera (`stream` variant)
+
+`rtl/axis_cam_bridge.v` turns a byte stream from the Zynq PS into OV7670 bus
+timing — `pclk`, `href`, `vsync`, `data` — so a frame sent from a host lands on
+the same pixel bus the camera drives, and nothing downstream of the source
+multiplexer in `top_starfront.v` can tell the difference. That is how the
+display path and the detector get exercised indoors, with no camera and no
+dark room.
+
+The bridge buffers a whole scanline before it emits anything, then bursts it
+out at 25 MHz behind one continuous HREF with ~144 cycles of blanking after
+it, because the OV7670 bus has no way to say "wait" mid-line. A 25 ms watchdog
+returns it to idle if the stream stops part way through a frame.
+
+- **Format.** The pipeline is luminance-only, so `gray_input` is tied high and
+  the host sends **640 bytes a line, 307 200 a frame**. The bridge expands each
+  Y into `{Y, 8'h80}` on the bus — neutral chroma — which is the byte order
+  `y_second = 0` expects.
+- **Frame sync.** Four bytes, `AA 55 AA 55`, start a fresh frame.
+- **Which source is live.** The stream wins as soon as it delivers a frame and
+  keeps winning (`ps_stream_locked`), and it also wins when no camera PCLK is
+  detected or when the variant holds the camera powered down. LED2 and LED3
+  light for the stream as they do for a working camera.
+
+```bash
+./scripts/build.sh impl stream
+./scripts/program.sh stream
+uv run python scripts/send_image_stream.py --port COM3 --baud 921600 --synthetic
+```
+
+**Pass:** the synthetic field appears on HDMI and the detector puts a cross on
+each of its five stars. If the picture is a fine vertical comb, the byte pick
+is wrong — see M4 above.

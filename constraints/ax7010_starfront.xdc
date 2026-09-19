@@ -92,6 +92,14 @@ set_clock_groups -asynchronous \
     -group [get_clocks -include_generated_clocks sys_clk] \
     -group [get_clocks cam_pclk]
 
+if {[llength [get_clocks -quiet clk_fpga_0]] > 0} {
+    set_clock_groups -asynchronous \
+        -group [get_clocks clk_fpga_0] \
+        -group [get_clocks -include_generated_clocks sys_clk]
+}
+
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -hierarchical -filter {NAME =~ *clk_out2*}]
+
 ## OV7670 datasheet: D[7:0] setup tSU = 15 ns, hold tHD = 8 ns relative to the
 ## PCLK rising edge (data changes tPDV = 5 ns after the falling edge). With a
 ## 40 ns period that gives a 25 ns max / 8 ns min arrival window.

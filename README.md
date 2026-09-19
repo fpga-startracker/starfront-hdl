@@ -4,10 +4,12 @@ Star tracker front end on an **ALINX AX7010** (Zynq-7000, `xc7z010clg400-1`),
 starting with bringing up an **OV7670** camera and getting a live image out of
 the board's HDMI port.
 
-The design is **PL-only** — the Zynq PS is not instantiated, so the bitstream
-loads straight over JTAG. Debug happens through the HDMI screen, four LEDs and
-an ILA, because the board's USB serial port hangs off PS MIO and is out of reach
-of PL logic.
+Three of the four build variants are **PL-only** — the Zynq PS is not
+instantiated, so the bitstream loads straight over JTAG. Debug happens through
+the HDMI screen, four LEDs and an ILA, because the board's USB serial port
+hangs off PS MIO and is out of reach of PL logic. The fourth, `stream`, brings
+the PS up on purpose: it is how a frame sent from a host over Ethernet gets
+into the detector with no camera plugged in.
 
 ## Where things stand
 
@@ -21,6 +23,7 @@ of PL logic.
 | M5 | Streaming star detection at the camera's full 640×480 | **passed on hardware** |
 | M6 | Sub-pixel centroiding, measured against a real star-field set | **passed on hardware** 2026-09-09, 0.477 px median over JTAG-streamed frames |
 | M7 | The centroiding pipeline on the live camera, with a star-field sensor profile | **RTL matches the model bit for bit at 640×480; not yet on the board** |
+| M8 | Frames in from the Zynq PS over AXI4-Stream, no camera attached | **RTL and testbench pass; not yet on the board** |
 
 **Camera bring-up is complete, and the star detector works.** As of 2026-09-04
 the board captures live video from an OV7670 on header J11 and displays it over
@@ -56,22 +59,28 @@ The gap between those two rows is the threshold, not the arithmetic - see
 [`docs/centroiding.md`](docs/centroiding.md), which also says what was measured
 rather than assumed and where the remaining error is.
 
-## Three build variants
+## Four build variants
 
-One source tree, three bitstreams, so the plain camera bring-up stays available
+One source tree, four bitstreams, so the plain camera bring-up stays available
 for demonstration without rebuilding it every time the star work moves.
 
 | Variant | Top | Contains |
 |---|---|---|
 | `bringup` | `top_starfront` | camera bring-up only, M0–M4 |
 | `tracker` | `top_starfront` | the above plus the sub-pixel centroiding pipeline on the live camera and the star-field sensor profile, M7 (`ENABLE_STARS=2`; 1 gives the older M5 peak detector) |
+| `stream` | `top_starfront` | `tracker` with the Zynq PS instantiated and the camera powered down: frames arrive over AXI4-Stream from a host (`SIM_CAM_ONLY=1`) |
 | `bench` | `top_starfront_bench` | no camera: replays stored star fields through the centroiding pipeline and draws the result |
+
+`bringup`, `tracker` and `bench` are PL-only and load straight over JTAG.
+`stream` is the one variant that instantiates the PS, because that is where
+the Ethernet and the DDR are.
 
 ```bash
 ./scripts/build.sh impl bringup     # -> build/starfront_bringup.bit
 ./scripts/build.sh impl tracker     # -> build/starfront_tracker.bit
+./scripts/build.sh impl stream      # -> build/starfront_stream.bit
 ./scripts/build.sh impl bench       # -> build/starfront_bench.bit
-./scripts/build.sh impl all         # all three
+./scripts/build.sh impl all         # all four
 
 ./scripts/program.sh bench
 ./scripts/open_gui.sh bringup       # open the GUI on a checked project
@@ -152,6 +161,36 @@ uv run bench/evaluate.py --centroider            # the arithmetic on its own
 cd sim/centroid && STARFRONT_DATA=<set> ../../.venv/bin/python test_runner_centroid.py
 ```
 
+## Streaming frames in from the PS, over Ethernet
+
+The `stream` variant replaces the camera with the Zynq PS. `axis_cam_bridge`
+turns an AXI4-Stream byte stream into OV7670 bus timing — `pclk`, `href`,
+`vsync`, `data` — so a frame that arrived over Ethernet lands on exactly the
+pixel bus the sensor would drive, and the capture path, the frame buffer and
+the centroiding pipeline behind it cannot tell the difference. That is the
+point: the detector under test is the same one, not a simulation of it.
+
+The pipeline is luminance-only, so the host sends 640 bytes a line and
+307 200 a frame, preceded by the four-byte marker `AA 55 AA 55`; the bridge
+expands each Y to `{Y, 0x80}` on the bus. It buffers a whole line before
+emitting it and then bursts it behind one continuous HREF, because the OV7670
+bus cannot be paused mid-line, and a 25 ms watchdog recovers if the stream
+stops part way through a frame.
+
+```bash
+./scripts/build.sh impl stream
+./scripts/program.sh stream
+uv run python scripts/send_image_stream.py --port COM3 --baud 921600 --synthetic
+```
+
+`top_starfront` picks the source itself: the stream wins once it has delivered
+a frame, and also when no camera PCLK is present, so the same bitstream works
+either way. This is complementary to the `bench` variant above — `bench` needs
+no host but can only replay what was baked into block RAM, `stream` needs a
+host but can send anything.
+
+Not yet exercised on the board.
+
 ## Quick start
 
 ```bash
@@ -163,9 +202,12 @@ cd sim/centroid && STARFRONT_DATA=<set> ../../.venv/bin/python test_runner_centr
 
 # Run the simulations (Icarus Verilog + cocotb)
 uv sync
-for s in tmds sccb vga capture star centroid; do
+for s in tmds sccb vga capture star bridge centroid; do
   (cd sim/$s && ../../.venv/bin/python test_runner_$s.py)
 done
+
+# Push a synthetic star field into the `stream` build from a host
+uv run python scripts/send_image_stream.py --port COM3 --baud 921600 --synthetic
 ```
 
 On the board: KEY1 resets, KEY2 held shows the status numbers over a live
@@ -174,6 +216,9 @@ luminance only), KEY4 steps the sensor window, and KEY2 held + KEY4 swaps
 which byte of each YUV422 pair is taken as Y. In the `tracker` build KEY3
 instead toggles the star-field sensor profile and KEY2 held + KEY3 steps its
 exposure/gain preset.
+
+Frames can also be pushed in from a host with no camera attached at all — see
+[Streaming frames in from the PS](#streaming-frames-in-from-the-ps-over-ethernet) below.
 
 Then follow [`docs/bringup_checklist.md`](docs/bringup_checklist.md) on the
 board, and wire the camera per
@@ -224,9 +269,10 @@ board, and wire the camera per
 ```
 rtl/          synthesisable Verilog
 constraints/  ax7010_starfront.xdc (camera), ax7010_bench.xdc (no camera)
-sim/          cocotb testbenches (tmds, sccb, vga, capture, star, centroid)
+sim/          cocotb testbenches (tmds, sccb, vga, capture, star, bridge, centroid)
 bench/        the centroiding model, the DUST scorer, the table generators
-scripts/      create_project.tcl, build.sh, program.sh, open_gui.sh
+scripts/      create_project.tcl, build.sh, program.sh, open_gui.sh,
+              ax7010_ps_bd.tcl (the PS block design), send_image_stream.py
 docs/         pinout, wiring, OV7670 notes, bring-up checklist, centroiding
 build/        generated, not version controlled
 ```
