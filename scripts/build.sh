@@ -5,11 +5,21 @@
 #   ./scripts/build.sh impl               build the tracker variant
 #   ./scripts/build.sh impl bringup       build the camera bring-up variant
 #   ./scripts/build.sh impl tracker       explicit
-#   ./scripts/build.sh impl all           build both, one after the other
+#   ./scripts/build.sh impl stream        build the PS AXI-Stream variant
+#   ./scripts/build.sh impl bench         build the centroiding bench
+#   ./scripts/build.sh impl all           build all four, one after the other
 #
 # Variants:
 #   bringup   camera bring-up only, milestones M0-M4
-#   tracker   the above plus the streaming star detector, M5
+#   tracker   the above plus the sub-pixel centroiding pipeline on the live
+#             camera and the star-field sensor profile, M7
+#   stream    tracker with the Zynq PS instantiated, feeding frames in over
+#             AXI4-Stream with the camera powered down. This is the one to
+#             build to push images in from a host over Ethernet.
+#   bench     no camera: replays stored star fields through the centroiding
+#             pipeline and draws the result. Reads build/frames.mem, which
+#             bench/prepare_frames.py writes - run that first, or the bitstream
+#             comes up showing a synthetic field instead.
 #
 # Set VIVADO to override the tool path.
 #
@@ -78,9 +88,42 @@ fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
+# The bench variant bakes build/frames.mem into the bitstream. That file lives
+# under build/, which is also where the tools work, and a store holding the
+# wrong thing draws a picture that looks entirely plausible - so the hash
+# bench/prepare_frames.py leaves beside it is checked here rather than trusted.
+check_frames() {
+    if [ ! -f "$BUILD_DIR/frames.mem" ]; then
+        echo "NOTE: build/frames.mem is missing, so the bench bitstream will hold a" >&2
+        echo "      synthetic star field. Run bench/prepare_frames.py for real data." >&2
+        return
+    fi
+    if [ ! -f "$BUILD_DIR/frames.sha256" ]; then
+        echo "NOTE: build/frames.mem has no frames.sha256 beside it, so there is no" >&2
+        echo "      way to tell what is in it. Re-run bench/prepare_frames.py." >&2
+        return
+    fi
+    if ! (cd "$BUILD_DIR" && sha256sum --status -c frames.sha256 2>/dev/null); then
+        echo "REFUSING TO BUILD - build/frames.mem does not match frames.sha256." >&2
+        echo "" >&2
+        echo "Something has rewritten it since bench/prepare_frames.py ran. The" >&2
+        echo "bitstream would hold whatever that is, and it would look plausible" >&2
+        echo "on screen. Re-run:" >&2
+        echo "  uv run bench/prepare_frames.py --report" >&2
+        exit 1
+    fi
+    echo "frames.mem verified: $(grep "^# " "$BUILD_DIR/frames.sha256" | sed "s/^# //" | tr "\n" " ")"
+}
+
+if [ "$VARIANT" = "bench" ] || [ "$VARIANT" = "all" ]; then
+    check_frames
+fi
+
 if [ "$VARIANT" = "all" ]; then
     build_one bringup
     build_one tracker
+    build_one stream
+    build_one bench
 else
     build_one "$VARIANT"
 fi

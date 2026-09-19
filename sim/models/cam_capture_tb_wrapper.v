@@ -15,16 +15,17 @@ module cam_capture_tb_wrapper (
     input  wire        href,
     input  wire        vsync,
     input  wire [7:0]  data,
+    input  wire        y_second,
 
     // Read-back side, driven by the testbench
     input  wire        rd_clk,
     input  wire [16:0] rd_addr,
-    output wire [15:0] rd_data,
+    output wire [7:0]  rd_data,
 
     // Observation
     output wire        cap_wr_en,
     output wire [16:0] cap_addr,
-    output wire [15:0] cap_data
+    output wire [7:0]  cap_data
 );
 
     cam_capture u_capture (
@@ -32,6 +33,7 @@ module cam_capture_tb_wrapper (
         .ov7670_href  ( href      ),
         .ov7670_vsync ( vsync     ),
         .ov7670_data  ( data      ),
+        .y_second     ( y_second  ),
         .cap_wr_en    ( cap_wr_en ),
         .cap_addr     ( cap_addr  ),
         .cap_data     ( cap_data  )

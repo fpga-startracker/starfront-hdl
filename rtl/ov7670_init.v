@@ -27,12 +27,13 @@ module ov7670_init
     input  wire        clk,
     input  wire        rst,
 
-    // Changing either of these re-runs the whole table with the new setting, so
-    // the test pattern and the window position can be tuned on the bench rather
-    // than costing a rebuild each time.
+    // Changing any of these re-runs the whole table with the new setting, so
+    // the test pattern, the window position and the star-field profile can be
+    // tuned on the bench rather than costing a rebuild each time.
     input  wire        color_bar,
-    input  wire        gray_mode,
     input  wire [1:0]  hstart_sel,
+    input  wire        astro,
+    input  wire [1:0]  preset,
 
     // Status
     output wire        init_done,      // High when all registers written
@@ -90,19 +91,19 @@ module ov7670_init
     ov7670_registers u_regs (
         .index      ( reg_index  ),
         .color_bar  ( color_bar  ),
-        .gray_mode  ( gray_mode  ),
         .hstart_sel ( hstart_sel ),
+        .astro      ( astro      ),
+        .preset     ( preset     ),
         .data       ( rom_data   )
     );
 
     //------------------------------------------------------------------------
-    // Latch a change of the runtime camera configuration until the sequencer is
-    // idle enough to act on it - the change is a single cycle and the FSM is
-    // usually mid-transaction.
+    // Latch a change of color_bar until the sequencer is idle enough to act on
+    // it - the change is a single cycle and the FSM is usually mid-transaction.
     //------------------------------------------------------------------------
-    wire [3:0] cfg = {gray_mode, hstart_sel, color_bar};
+    wire [5:0] cfg = {preset, astro, hstart_sel, color_bar};
 
-    reg [3:0] cfg_d     = 4'd0;
+    reg [5:0] cfg_d     = 6'd0;
     reg       cfg_dirty = 1'b0;
     wire cfg_changed = (cfg != cfg_d);
 

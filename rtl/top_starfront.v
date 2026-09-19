@@ -2,19 +2,22 @@
 
 //============================================================================
 // Module: top_starfront
-// Description: OV7670 top level for the ALINX AX7010 (xc7z010clg400-1).
-//              PL-only: the Zynq PS is not instantiated, so the bitstream is
-//              loaded straight over JTAG.
+// Description: OV7670 & AXI4-Stream Star Tracker Top Level for the ALINX AX7010
+//              (xc7z010clg400-1).
 //
-//   ENABLE_STARS picks between two builds from one source tree:
+//   ENABLE_STARS picks between three builds from one source tree:
 //
 //     0  camera bring-up only. Clocking, HDMI, SCCB, camera init, the stream
 //        geometry probe and the live picture - milestones M0 to M4, and the
 //        thing to show when the question is "does the camera work".
-//     1  the above plus the streaming star detector (M5).
+//     1  the above plus the streaming peak detector of M5 (star_detect), which
+//        marks the brightest point. Hardware-proven on a torch in a dark room.
+//     2  the above with the sub-pixel centroiding pipeline from the bench
+//        (star_centroid) running on the live camera at its full 640x480, a
+//        cross on every star it lists, and the star-field register profile
+//        on KEY3 - milestone M7. The `tracker` build is this one.
 //
-//   scripts/build.sh builds either; they land as separate bitstreams so both
-//   stay available without rebuilding.
+//   scripts/build.sh builds any of them; they land as separate bitstreams.
 //
 //   Milestones in this build:
 //     M1  50 MHz PL_GCLK -> MMCM -> 25 MHz pixel + 125 MHz serial, DVI out on
@@ -22,31 +25,88 @@
 //     M2  SCCB master with read, camera ID probe
 //     M3  94-register camera init, and a probe that measures what the sensor
 //         is really emitting (bytes per line, lines per frame, PCLK, fps)
-//     M4  320x240 RGB565 frame buffer, pixel-doubled back to 640x480
+//     M4  320x240 8-bit luminance frame buffer, pixel-doubled back to 640x480.
+//         The sensor runs in YUV422 and only Y is kept: the picture is gray,
+//         the buffer is half what RGB565 cost, and the star path gets the
+//         sensor's own luminance instead of one approximated from colour.
 //     M5  streaming star detection at the camera's full 640x480, with no frame
 //         buffer at all - see star_detect.v for why that is the right shape
+//     M7  star_centroid on the camera: per-column background, 9x9 region
+//         growing, centre of gravity to 1/256 pixel, up to 64 stars a frame,
+//         and a sensor profile with exposure, gain, gamma and the de-noise
+//         blocks set for stars rather than for a pleasant picture
 //
-//   Controls:
+//   Two things can drive the pixel bus, and everything downstream of the
+//   multiplexer cannot tell them apart:
+//     1. the OV7670 on expansion header J11 (bank 35, 3.3 V)
+//     2. the Zynq PS, over AXI4-Stream into axis_cam_bridge, which turns a
+//        byte stream into OV7670 PCLK/HREF/VSYNC/DATA timing. That is how a
+//        frame sent from a host over Ethernet reaches the detector with no
+//        camera plugged in at all. The bridge is fed luminance, one byte per
+//        pixel, because the pipeline behind it has no colour path.
+//   The stream wins whenever it is delivering frames, or when SIM_CAM_ONLY
+//   holds the camera powered down; otherwise the camera does.
+//
+//   Controls (Pushbuttons):
 //     KEY1  reset
 //     KEY2  hold to force the status overlay while a live image is showing
-//     KEY3  toggle the camera between RGB565 and YUV422 grayscale output
+//     KEY3  toggle the sensor's built-in 8-bar test pattern - a descending
+//           gray staircase in Y, white on the left to black on the right.
+//           In the M7 build KEY3 instead toggles the star-field register
+//           profile (astro), and KEY2 held + KEY3 steps its exposure/gain
+//           preset 0-3; both show on the overlay's row 0, see below.
 //     KEY4  step the horizontal window position, 0-3, shown on the overlay.
 //           Use it if the picture has a band of junk down one edge: that is
 //           the sensor's window sitting over its dummy columns, and no amount
 //           of FPGA-side work can recover it.
+//     KEY2 + KEY4  (KEY4 pressed while KEY2 is held) swap which byte of each
+//           YUV422 pair is taken as Y. The overlay's window digit reads 4
+//           higher while swapped. Use it if the picture is a fine vertical
+//           comb or the test bars are bright and dark in the wrong order:
+//           that is the chroma byte being displayed instead of the luma.
 //
 //   LEDs (active low on this board, so lit means the signal is high):
-//     LED1  heartbeat        LED2  camera ID ok
-//     LED3  init done        LED4  stream geometry ok
+//     LED1  heartbeat (25 MHz toggle)
+//     LED2  camera ID ok (or PS stream active)
+//     LED3  init done (or PS stream active)
+//     LED4  stream geometry ok (640x480 verified)
 //
 //   SCCB ownership passes from sccb_probe to ov7670_init the moment the camera
 //   answers with the right product ID; until then the probe keeps retrying, so
 //   the camera can be plugged in with the bitstream already running.
 //============================================================================
-
 module top_starfront #(
-    parameter integer ENABLE_STARS = 1
+    parameter integer ENABLE_STARS = 1,
+    parameter integer SIM_CAM_ONLY = 0   // 1 = frames come only from the PS, the camera is held powered down
 ) (
+`ifndef NO_PS
+    // Zynq PS DDR and fixed IO. These exist only in the `stream` variant: the
+    // other builds define NO_PS, which stubs out the PS wrapper below, and a
+    // top level carrying unconnected DDR pins it never places would fail
+    // write_bitstream on unconstrained IO.
+    inout [14:0] DDR_addr,
+    inout [2:0]  DDR_ba,
+    inout        DDR_cas_n,
+    inout        DDR_ck_n,
+    inout        DDR_ck_p,
+    inout        DDR_cke,
+    inout        DDR_cs_n,
+    inout [3:0]  DDR_dm,
+    inout [31:0] DDR_dq,
+    inout [3:0]  DDR_dqs_n,
+    inout [3:0]  DDR_dqs_p,
+    inout        DDR_odt,
+    inout        DDR_ras_n,
+    inout        DDR_reset_n,
+    inout        DDR_we_n,
+    inout        FIXED_IO_ddr_vrn,
+    inout        FIXED_IO_ddr_vrp,
+    inout [53:0] FIXED_IO_mio,
+    inout        FIXED_IO_ps_clk,
+    inout        FIXED_IO_ps_porb,
+    inout        FIXED_IO_ps_srstb,
+`endif
+
     // Clock and buttons
     input  wire        sys_clk,        // U18, 50 MHz PL_GCLK
     input  wire [3:0]  key_n,          // KEY1..KEY4, active low
@@ -112,10 +172,93 @@ module top_starfront #(
     wire rst_pix = rst_sync[3];
 
     //------------------------------------------------------------------------
-    // Debounced keys
+    // Zynq PS Wrapper & AXI4-Stream Interface
+    //------------------------------------------------------------------------
+    wire [31:0] ps_axis_tdata;
+    wire        ps_axis_tlast;
+    wire        ps_axis_tready;
+    wire        ps_axis_tvalid;
+    wire        ps_stream_clk;
+
+`ifndef SIM
+`ifndef NO_PS
+    ax7010_PS_wrapper u_ps_wrapper (
+        .DDR_addr          ( DDR_addr          ),
+        .DDR_ba            ( DDR_ba            ),
+        .DDR_cas_n         ( DDR_cas_n         ),
+        .DDR_ck_n          ( DDR_ck_n          ),
+        .DDR_ck_p          ( DDR_ck_p          ),
+        .DDR_cke           ( DDR_cke           ),
+        .DDR_cs_n          ( DDR_cs_n          ),
+        .DDR_dm            ( DDR_dm            ),
+        .DDR_dq            ( DDR_dq            ),
+        .DDR_dqs_n         ( DDR_dqs_n         ),
+        .DDR_dqs_p         ( DDR_dqs_p         ),
+        .DDR_odt           ( DDR_odt           ),
+        .DDR_ras_n         ( DDR_ras_n         ),
+        .DDR_reset_n       ( DDR_reset_n       ),
+        .DDR_we_n          ( DDR_we_n          ),
+        .FCLK_CLK0         ( ps_stream_clk     ),
+        .FIXED_IO_ddr_vrn  ( FIXED_IO_ddr_vrn  ),
+        .FIXED_IO_ddr_vrp  ( FIXED_IO_ddr_vrp  ),
+        .FIXED_IO_mio      ( FIXED_IO_mio      ),
+        .FIXED_IO_ps_clk   ( FIXED_IO_ps_clk   ),
+        .FIXED_IO_ps_porb  ( FIXED_IO_ps_porb  ),
+        .FIXED_IO_ps_srstb ( FIXED_IO_ps_srstb ),
+        .M_AXIS_tdata      ( ps_axis_tdata      ),
+        .M_AXIS_tlast      ( ps_axis_tlast      ),
+        .M_AXIS_tready     ( ps_axis_tready     ),
+        .M_AXIS_tvalid     ( ps_axis_tvalid     )
+    );
+`else
+    assign ps_stream_clk  = sys_clk;
+    assign ps_axis_tdata  = 32'd0;
+    assign ps_axis_tlast  = 1'b0;
+    assign ps_axis_tvalid = 1'b0;
+`endif
+`else
+    assign ps_stream_clk  = sys_clk;
+    assign ps_axis_tdata  = 32'd0;
+    assign ps_axis_tlast  = 1'b0;
+    assign ps_axis_tvalid = 1'b0;
+`endif
+
+    reg [3:0] rst_ps_sync = 4'hF;
+    always @(posedge ps_stream_clk) begin
+        if (rst_raw) rst_ps_sync <= 4'hF;
+        else         rst_ps_sync <= {rst_ps_sync[2:0], 1'b0};
+    end
+    wire rst_ps = rst_ps_sync[3];
+
+    //------------------------------------------------------------------------
+    // AXI-Stream CDC & 32-to-8 Bit Width Converter
+    // Crosses from PS Stream Clock (50 MHz) to Pixel Clock (25 MHz)
+    //------------------------------------------------------------------------
+    wire [7:0] bridge_s_axis_tdata;
+    wire       bridge_s_axis_tvalid;
+    wire       bridge_s_axis_tready;
+    wire       bridge_s_axis_tlast;
+
+    axis_async_fifo_32to8 u_axis_fifo (
+        .wr_clk        ( ps_stream_clk        ),
+        .wr_rst        ( rst_ps               ),
+        .s_axis_tdata  ( ps_axis_tdata        ),
+        .s_axis_tvalid ( ps_axis_tvalid       ),
+        .s_axis_tready ( ps_axis_tready       ),
+        .s_axis_tlast  ( ps_axis_tlast        ),
+        .rd_clk        ( clk_pix              ),
+        .rd_rst        ( rst_pix              ),
+        .m_axis_tdata  ( bridge_s_axis_tdata  ),
+        .m_axis_tvalid ( bridge_s_axis_tvalid ),
+        .m_axis_tready ( bridge_s_axis_tready ),
+        .m_axis_tlast  ( bridge_s_axis_tlast  )
+    );
+
+    //------------------------------------------------------------------------
+    // Debounced keys & Mode Controls
     //------------------------------------------------------------------------
     wire key2_pressed;   // hold to show the overlay
-    wire key3_pressed;   // toggle the sensor test pattern
+    wire key3_pressed;   // test bars, or the astro profile in the M7 build
     wire key4_pressed;   // step the horizontal window
 
     key_debounce #(.CLK_FREQ(PIX_FREQ)) u_key2 (
@@ -128,39 +271,92 @@ module top_starfront #(
         .clk ( clk_pix ), .key_raw ( ~key_n[3] ), .key_stable ( key4_pressed )
     );
 
-    // KEY3 toggles the camera output mode between RGB565 and YUV422 grayscale.
     // KEY4 steps through the four window positions on each press.
     // Position 1 is the default because it is the one that came out clean on
     // this board - position 0, inherited from the Basys 3 project, put the
     // sensor's dummy columns inside the captured window and produced a band of
     // junk down the right edge.
+    //
+    // With KEY2 held, KEY4 instead toggles y_second: which byte of each YUV422
+    // pair the capture logic takes as luminance. The register table asks the
+    // sensor for Y first, but the sensor's own default is Y second and the two
+    // are one bit apart in TSLB, so the choice is made reversible on the bench
+    // rather than being trusted to a datasheet reading.
+    //
+    // In the M7 build KEY3 is the star-field profile: a press toggles astro,
+    // and a press with KEY2 held steps the exposure/gain preset. The consumer
+    // profile is the power-up default so the first picture is a recognisable
+    // one; astro is what to switch to once the lens is pointed at the sky.
+    // The bring-up builds keep KEY3 as the test-pattern key.
     localparam [1:0] HSTART_DEFAULT = 2'd1;
+    localparam       Y_SECOND_DEFAULT = 1'b0;
+    localparam       ASTRO_KEYS = (ENABLE_STARS == 2);
 
     reg [1:0] hstart_sel = HSTART_DEFAULT;
-    reg       gray_mode  = 1'b0;
+    reg       y_second   = Y_SECOND_DEFAULT;
+    reg       astro      = 1'b0;
+    reg [1:0] preset     = 2'd0;
     reg       key3_prev  = 1'b0;
     reg       key4_prev  = 1'b0;
 
     always @(posedge clk_pix) begin
         if (rst_pix) begin
             hstart_sel <= HSTART_DEFAULT;
-            gray_mode  <= 1'b0;
+            y_second   <= Y_SECOND_DEFAULT;
+            astro      <= 1'b0;
+            preset     <= 2'd0;
             key3_prev  <= 1'b0;
             key4_prev  <= 1'b0;
         end else begin
             key3_prev <= key3_pressed;
             key4_prev <= key4_pressed;
-
-            if (key3_pressed && !key3_prev)
-                gray_mode <= ~gray_mode;
-
-            if (key4_pressed && !key4_prev)
-                hstart_sel <= hstart_sel + 2'd1;
+            if (key4_pressed && !key4_prev) begin
+                if (key2_pressed)
+                    y_second   <= ~y_second;
+                else
+                    hstart_sel <= hstart_sel + 2'd1;
+            end
+            if (ASTRO_KEYS && key3_pressed && !key3_prev) begin
+                if (key2_pressed)
+                    preset <= preset + 2'd1;
+                else
+                    astro  <= ~astro;
+            end
         end
     end
 
+    wire color_bar_in = ASTRO_KEYS ? 1'b0 : key3_pressed;
+
     //------------------------------------------------------------------------
-    // Camera clock and power sequencing
+    // Camera Bridge: converts AXI4-Stream bytes into OV7670 camera timings
+    //------------------------------------------------------------------------
+    wire       emu_pclk;
+    wire       emu_href;
+    wire       emu_vsync;
+    wire [7:0] emu_data;
+    wire       cam_bridge_active;
+    wire [9:0] bridge_current_line;
+    wire       bridge_frame_done;
+
+    axis_cam_bridge u_axis_cam_bridge (
+        .clk           ( clk_pix              ),
+        .rst           ( rst_pix              ),
+        .s_axis_tdata  ( bridge_s_axis_tdata  ),
+        .s_axis_tvalid ( bridge_s_axis_tvalid ),
+        .s_axis_tready ( bridge_s_axis_tready ),
+        .s_axis_tlast  ( bridge_s_axis_tlast  ),
+        .gray_input    ( 1'b1                 ),   // the pipeline is luminance-only
+        .emu_pclk      ( emu_pclk             ),
+        .emu_href      ( emu_href             ),
+        .emu_vsync     ( emu_vsync            ),
+        .emu_data      ( emu_data             ),
+        .frame_active  ( cam_bridge_active    ),
+        .current_line  ( bridge_current_line  ),
+        .frame_done    ( bridge_frame_done    )
+    );
+
+    //------------------------------------------------------------------------
+    // Physical Camera clock and power sequencing
     //   XCLK is clock-forwarded through an ODDR so it leaves the pin as a clean
     //   clock rather than as fabric logic.
     //   RESET# is held low for ~2.6 ms after reset, then released.
@@ -173,7 +369,7 @@ module top_starfront #(
         .INIT         (1'b0),
         .SRTYPE       ("SYNC")
     ) u_xclk_oddr (
-        .Q (ov7670_xclk), .C (clk_pix), .CE (1'b1),
+        .Q (ov7670_xclk), .C (clk_pix), .CE (SIM_CAM_ONLY == 0),
         .D1(1'b1),        .D2(1'b0),    .R  (1'b0), .S (1'b0)
     );
 `endif
@@ -192,8 +388,8 @@ module top_starfront #(
         end
     end
 
-    assign ov7670_reset_n = cam_reset_n_r;
-    assign ov7670_pwdn    = 1'b0;          // low = normal operation
+    assign ov7670_reset_n = (SIM_CAM_ONLY != 0) ? 1'b0 : cam_reset_n_r;
+    assign ov7670_pwdn    = (SIM_CAM_ONLY != 0) ? 1'b1 : 1'b0; // low = normal operation, high = power down
 
     //------------------------------------------------------------------------
     // SCCB bus: one master, two users. The probe owns it until the camera has
@@ -273,9 +469,10 @@ module top_starfront #(
     ov7670_init #(.CLK_FREQ(PIX_FREQ)) u_ov7670_init (
         .clk           ( clk_pix       ),
         .rst           ( rst_pix | ~probe_locked ),   // held until the bus is ours
-        .color_bar     ( 1'b0          ),
-        .gray_mode     ( gray_mode     ),
+        .color_bar     ( color_bar_in  ),
         .hstart_sel    ( hstart_sel    ),
+        .astro         ( astro         ),
+        .preset        ( preset        ),
         .init_done     ( init_done     ),
         .sccb_start    ( init_start    ),
         .sccb_sub_addr ( init_sub_addr ),
@@ -284,30 +481,78 @@ module top_starfront #(
     );
 
     //------------------------------------------------------------------------
-    // Camera pixel bus
+    // Physical Camera Pixel Bus & Activity Monitor
     //------------------------------------------------------------------------
-    wire cam_pclk;
+    wire phys_cam_pclk;
 
 `ifdef SIM
-    assign cam_pclk = ov7670_pclk;
+    assign phys_cam_pclk = ov7670_pclk;
 `else
-    BUFG u_pclk_bufg (.I(ov7670_pclk), .O(cam_pclk));
+    BUFG u_phys_pclk_bufg (.I(ov7670_pclk), .O(phys_cam_pclk));
 `endif
 
     wire pclk_alive, href_alive, vsync_alive, data_alive;
 
     cam_activity #(.CLK_FREQ(PIX_FREQ)) u_cam_activity (
-        .clk         ( clk_pix      ),
-        .rst         ( rst_pix      ),
-        .cam_pclk    ( cam_pclk     ),
-        .cam_href    ( ov7670_href  ),
-        .cam_vsync   ( ov7670_vsync ),
-        .cam_data    ( ov7670_data  ),
-        .pclk_alive  ( pclk_alive   ),
-        .href_alive  ( href_alive   ),
-        .vsync_alive ( vsync_alive  ),
-        .data_alive  ( data_alive   )
+        .clk         ( clk_pix        ),
+        .rst         ( rst_pix        ),
+        .cam_pclk    ( phys_cam_pclk  ),
+        .cam_href    ( ov7670_href    ),
+        .cam_vsync   ( ov7670_vsync   ),
+        .cam_data    ( ov7670_data    ),
+        .pclk_alive  ( pclk_alive     ),
+        .href_alive  ( href_alive     ),
+        .vsync_alive ( vsync_alive    ),
+        .data_alive  ( data_alive     )
     );
+
+    //------------------------------------------------------------------------
+    // Camera Source Multiplexer (Physical Camera vs AXI-Stream Bridge)
+    // - SIM_CAM_ONLY != 0: Exclusively stream from PS AXI-Stream bridge.
+    // - ps_stream_locked: Latches high once PS sends even one frame, locking
+    //   display to sim_axi permanently to prevent falling back to real camera between frames.
+    // - Auto-selects AXI Stream if no physical camera is plugged in (~pclk_alive).
+    //------------------------------------------------------------------------
+    reg ps_stream_locked = 1'b0;
+
+    always @(posedge clk_pix) begin
+        if (rst_pix)
+            ps_stream_locked <= 1'b0;
+        else if (cam_bridge_active)
+            ps_stream_locked <= 1'b1;
+    end
+
+    wire use_axis_cam = (SIM_CAM_ONLY != 0) | ps_stream_locked | cam_bridge_active | ~pclk_alive;
+
+    wire cam_pclk_src;
+
+`ifdef SIM
+    assign cam_pclk_src = use_axis_cam ? clk_pix : phys_cam_pclk;
+`else
+    generate
+    if (SIM_CAM_ONLY != 0) begin : g_sim_pclk
+        assign cam_pclk_src = clk_pix;
+    end else begin : g_hw_pclk
+        BUFGMUX u_bufgmux_pclk (
+            .O  ( cam_pclk_src  ),
+            .I0 ( phys_cam_pclk ),
+            .I1 ( clk_pix       ),
+            .S  ( use_axis_cam  )
+        );
+    end
+    endgenerate
+`endif
+
+    wire       cam_href_src  = use_axis_cam ? emu_href  : ov7670_href;
+    wire       cam_vsync_src = use_axis_cam ? emu_vsync : ov7670_vsync;
+    wire [7:0] cam_data_src  = use_axis_cam ? emu_data  : ov7670_data;
+
+    // The byte select is a quasi-static control bit from the pixel domain; one
+    // synchroniser takes it into whichever camera domain is selected, and both
+    // consumers read it from there. It sits after the mux because cam_pclk_src
+    // is the clock the capture path actually runs on.
+    wire y_second_p;
+    cdc_sync #(.WIDTH(1)) u_sy_ysel (.clk(cam_pclk_src), .din(y_second), .dout(y_second_p));
 
     //------------------------------------------------------------------------
     // Full resolution tap for the star detector, built only when asked for.
@@ -316,26 +561,33 @@ module top_starfront #(
     //------------------------------------------------------------------------
     wire [7:0] star_count_s, star_thresh_s, star_max_s;
     wire [9:0] bright_x_s, bright_y_s;
+    wire [31:0] row3_s;                 // the overlay's fourth row, per build
+
+    // M7 star list, read by the marker in the pixel domain. The published
+    // bank is static for a whole camera frame, so an asynchronous read of it
+    // is safe except for the cycle the bank flips - one wrong marker pixel,
+    // once a frame, in a place the eye cannot find.
+    wire [5:0]  m7_rd_addr;
+    wire [17:0] m7_rd_x, m7_rd_y;
+    wire [6:0]  m7_count_x;
 
     generate
-    if (ENABLE_STARS != 0) begin : g_stars
+    if (ENABLE_STARS == 1) begin : g_stars
 
         wire        pix_valid;
         wire [9:0]  pix_x, pix_y;
-        wire [15:0] pix_rgb;
         wire [7:0]  pix_luma;
         wire        cam_frame_start;
 
         cam_pixel_stream u_pixel_stream (
-            .pclk        ( cam_pclk        ),
-            .href        ( ov7670_href     ),
-            .vsync       ( ov7670_vsync    ),
-            .data        ( ov7670_data     ),
-            .gray_mode   ( gray_mode       ),
+            .pclk        ( cam_pclk_src    ),
+            .href        ( cam_href_src    ),
+            .vsync       ( cam_vsync_src   ),
+            .data        ( cam_data_src    ),
+            .y_second    ( y_second_p      ),
             .pix_valid   ( pix_valid       ),
             .pix_x       ( pix_x           ),
             .pix_y       ( pix_y           ),
-            .pix_rgb     ( pix_rgb         ),
             .pix_luma    ( pix_luma        ),
             .frame_start ( cam_frame_start )
         );
@@ -346,7 +598,7 @@ module top_starfront #(
         wire        tog_p;
 
         star_detect u_star_detect (
-            .pclk        ( cam_pclk        ),
+            .pclk        ( cam_pclk_src    ),
             .rst         ( 1'b0            ),
             .pix_valid   ( pix_valid       ),
             .pix_x       ( pix_x           ),
@@ -400,6 +652,133 @@ module top_starfront #(
         assign star_max_s    = max_r;
         assign bright_x_s    = bx_r;
         assign bright_y_s    = by_r;
+        // stars found, detection threshold, brightest pixel in the frame
+        assign row3_s        = {count_r, thresh_r, max_r, 8'h00};
+
+        assign m7_rd_x       = 18'd0;
+        assign m7_rd_y       = 18'd0;
+        assign m7_count_x    = 7'd0;
+
+    end else if (ENABLE_STARS == 2) begin : g_astro
+
+        wire        pix_valid;
+        wire [9:0]  pix_x, pix_y;
+        wire [7:0]  pix_luma;
+        wire        cam_frame_start;
+
+        cam_pixel_stream u_pixel_stream (
+            .pclk        ( cam_pclk_src    ),
+            .href        ( cam_href_src    ),
+            .vsync       ( cam_vsync_src   ),
+            .data        ( cam_data_src    ),
+            .y_second    ( y_second_p      ),
+            .pix_valid   ( pix_valid       ),
+            .pix_x       ( pix_x           ),
+            .pix_y       ( pix_y           ),
+            .pix_luma    ( pix_luma        ),
+            .frame_start ( cam_frame_start )
+        );
+
+        // Reset into the camera domain. Every register in the detector has a
+        // power-up value, so this only matters for KEY1 - and it cannot land
+        // while the camera is not clocking, which is also when it cannot matter.
+        wire rst_cam;
+        cdc_sync #(.WIDTH(1)) u_sy_rst (.clk(cam_pclk_src), .din(rst_pix), .dout(rst_cam));
+
+        wire [6:0]  count_p, drop_p;
+        wire [7:0]  bg_p, thr_p;
+        wire [13:0] mad_p;
+        wire [17:0] best_x_p, best_y_p;
+        wire [19:0] best_sum_p;
+        wire [15:0] fcnt_p;
+
+        // The bench's detector, at the camera's geometry: 640x480, no binning,
+        // and no field-of-view mask - the lens is whatever is on the sensor.
+        star_centroid #(
+            .IMG_W(640), .IMG_H(480), .XW(10), .YW(9), .CW(18),
+            .FOV_CX(320), .FOV_CY(240), .FOV_R(0)
+        ) u_det (
+            .clk           ( cam_pclk_src    ),
+            .rst           ( rst_cam         ),
+            .in_valid      ( pix_valid       ),
+            .in_x          ( pix_x           ),
+            .in_y          ( pix_y[8:0]      ),
+            .in_code       ( pix_luma        ),
+            .frame_start   ( cam_frame_start ),
+            .fov_ox        ( 6'sd0           ),
+            .fov_oy        ( 6'sd0           ),
+            .star_count    ( count_p         ),
+            .dropped       ( drop_p          ),
+            .overflow      (                 ),
+            .best_x        ( best_x_p        ),
+            .best_y        ( best_y_p        ),
+            .best_sum      ( best_sum_p      ),
+            .frame_count   ( fcnt_p          ),
+            .rd_addr       ( m7_rd_addr      ),
+            .rd_x          ( m7_rd_x         ),
+            .rd_y          ( m7_rd_y         ),
+            .rd_sum        (                 ),
+            .rd_npx        (                 ),
+            .rd2_addr      ( 6'd0            ),
+            .rd2_x         (                 ),
+            .rd2_y         (                 ),
+            .rd2_sum       (                 ),
+            .rd2_npx       (                 ),
+            .bg_code       ( bg_p            ),
+            .thr_grow_code ( thr_p           ),
+            .mad_acc       ( mad_p           )
+        );
+
+        // Per-frame numbers for the overlay cross on the toggle handshake the
+        // M5 path uses. The background and threshold change every column, so
+        // they are snapshotted at the frame boundary first; the toggle flips
+        // one cycle after everything behind it has settled.
+        reg [7:0] bg_snap = 8'd0, thr_snap = 8'd0;
+        reg       fs_d    = 1'b0;
+        reg       tog_p   = 1'b0;
+
+        always @(posedge cam_pclk_src) begin
+            fs_d <= cam_frame_start;
+            if (cam_frame_start) begin
+                bg_snap  <= bg_p;
+                thr_snap <= thr_p;
+            end
+            if (fs_d)
+                tog_p <= ~tog_p;
+        end
+
+        wire       tog_x;
+        wire [6:0] count_x, drop_x;
+        wire [7:0] bg_x, thr_x;
+
+        cdc_sync #(.WIDTH(1)) u_sy_tog (.clk(clk_pix), .din(tog_p),    .dout(tog_x));
+        cdc_sync #(.WIDTH(7)) u_sy_cnt (.clk(clk_pix), .din(count_p),  .dout(count_x));
+        cdc_sync #(.WIDTH(7)) u_sy_drp (.clk(clk_pix), .din(drop_p),   .dout(drop_x));
+        cdc_sync #(.WIDTH(8)) u_sy_bg  (.clk(clk_pix), .din(bg_snap),  .dout(bg_x));
+        cdc_sync #(.WIDTH(8)) u_sy_thr (.clk(clk_pix), .din(thr_snap), .dout(thr_x));
+
+        reg [6:0] count_r = 7'd0, drop_r = 7'd0;
+        reg [7:0] bg_r    = 8'd0, thr_r  = 8'd0;
+        reg       tog_d   = 1'b0;
+
+        always @(posedge clk_pix) begin
+            tog_d <= tog_x;
+            if (tog_x != tog_d) begin
+                count_r <= count_x;
+                drop_r  <= drop_x;
+                bg_r    <= bg_x;
+                thr_r   <= thr_x;
+            end
+        end
+
+        assign m7_count_x    = count_r;
+        assign star_count_s  = {1'b0, count_r};
+        assign star_thresh_s = thr_r;
+        assign star_max_s    = bg_r;
+        assign bright_x_s    = 10'd0;
+        assign bright_y_s    = 10'd0;
+        // stars listed, grow threshold, background, seeds dropped
+        assign row3_s        = {1'b0, count_r, thr_r, bg_r, 1'b0, drop_r};
 
     end else begin : g_no_stars
 
@@ -408,10 +787,17 @@ module top_starfront #(
         assign star_max_s    = 8'd0;
         assign bright_x_s    = 10'd0;
         assign bright_y_s    = 10'd0;
+        assign row3_s        = 32'd0;
+        assign m7_rd_x       = 18'd0;
+        assign m7_rd_y       = 18'd0;
+        assign m7_count_x    = 7'd0;
 
     end
     endgenerate
 
+    //------------------------------------------------------------------------
+    // Stream geometry probe
+    //------------------------------------------------------------------------
     wire [15:0] bytes_per_line, lines_per_frame;
     wire [7:0]  frames_per_sec, pclk_freq_100k;
     wire        stream_ok;
@@ -419,9 +805,9 @@ module top_starfront #(
     cam_stream_probe #(.CLK_FREQ(PIX_FREQ)) u_stream_probe (
         .clk             ( clk_pix         ),
         .rst             ( rst_pix         ),
-        .cam_pclk        ( cam_pclk        ),
-        .cam_href        ( ov7670_href     ),
-        .cam_vsync       ( ov7670_vsync    ),
+        .cam_pclk        ( cam_pclk_src    ),
+        .cam_href        ( cam_href_src    ),
+        .cam_vsync       ( cam_vsync_src   ),
         .bytes_per_line  ( bytes_per_line  ),
         .lines_per_frame ( lines_per_frame ),
         .frames_per_sec  ( frames_per_sec  ),
@@ -432,37 +818,38 @@ module top_starfront #(
     //------------------------------------------------------------------------
     // Capture into the frame buffer (camera domain) and read it back out
     // (pixel domain). The dual-clock block RAM is the clock domain crossing.
+    // Frame buffer: 320x240 8-bit luminance, pixel-doubled back to 640x480.
     //------------------------------------------------------------------------
     wire        cap_wr_en;
     wire [16:0] cap_addr;
-    wire [15:0] cap_data;
+    wire [7:0]  cap_data;
 
     cam_capture u_cam_capture (
-        .ov7670_pclk  ( cam_pclk     ),
-        .ov7670_href  ( ov7670_href  ),
-        .ov7670_vsync ( ov7670_vsync ),
-        .ov7670_data  ( ov7670_data  ),
-        .gray_mode    ( gray_mode    ),
-        .cap_wr_en    ( cap_wr_en    ),
-        .cap_addr     ( cap_addr     ),
-        .cap_data     ( cap_data     )
+        .ov7670_pclk  ( cam_pclk_src  ),
+        .ov7670_href  ( cam_href_src  ),
+        .ov7670_vsync ( cam_vsync_src ),
+        .ov7670_data  ( cam_data_src  ),
+        .y_second     ( y_second_p    ),
+        .cap_wr_en    ( cap_wr_en     ),
+        .cap_addr     ( cap_addr      ),
+        .cap_data     ( cap_data      )
     );
 
     wire [16:0] fb_addr_rd;
-    wire [15:0] fb_data_rd;
+    wire [7:0]  fb_data_rd;
 
     fb_mem u_fb_mem (
-        .clk_wr  ( cam_pclk   ),
-        .wr_en   ( cap_wr_en  ),
-        .addr_wr ( cap_addr   ),
-        .data_wr ( cap_data   ),
-        .clk_rd  ( clk_pix    ),
-        .addr_rd ( fb_addr_rd ),
-        .data_rd ( fb_data_rd )
+        .clk_wr  ( cam_pclk_src ),
+        .wr_en   ( cap_wr_en    ),
+        .addr_wr ( cap_addr     ),
+        .data_wr ( cap_data     ),
+        .clk_rd  ( clk_pix      ),
+        .addr_rd ( fb_addr_rd   ),
+        .data_rd ( fb_data_rd   )
     );
 
     //------------------------------------------------------------------------
-    // Display timing
+    // Display timing (VGA 640x480 @ 60Hz)
     //------------------------------------------------------------------------
     wire       vga_hsync_p, vga_vsync_p, vga_active, vga_frame_tick;
     wire [9:0] vga_pixel_x, vga_pixel_y;
@@ -517,7 +904,7 @@ module top_starfront #(
         .b          ( img_b      )
     );
 
-    wire [1:0] banner_level = (!cam_id_ok) ? 2'd0 : (stream_ok ? 2'd2 : 2'd1);
+    wire [1:0] banner_level = (!cam_id_ok && !cam_bridge_active) ? 2'd0 : (stream_ok ? 2'd2 : 2'd1);
 
     wire [7:0] ovl_r, ovl_g, ovl_b;
 
@@ -528,14 +915,16 @@ module top_starfront #(
         .pixel_y      ( vga_pixel_y    ),
         .active       ( vga_active     ),
         .frame_tick   ( vga_frame_tick ),
-        // digits: PID VER, then the window selection, then the register read-back
-        .row0         ( {cam_pid, cam_ver, 6'b0, hstart_sel, cam_readback} ),
+        // digits: PID VER, then {astro, preset, 0, 0, y_second, hstart_sel}
+        // as two hex digits, then the register read-back. 01 is the consumer
+        // profile with the default window; 81/A1/C1/E1 are astro presets 0-3;
+        // +4 on the low digit means the Y byte is swapped.
+        .row0         ( {cam_pid, cam_ver, astro, preset, 2'b0, y_second, hstart_sel, cam_readback} ),
         .row1         ( {bytes_per_line, lines_per_frame}       ),
         .row2         ( {8'h00, pclk_freq_100k, 8'h00, frames_per_sec} ),
-        // stars found, detection threshold, brightest pixel in the frame
-        .row3         ( {star_count_s, star_thresh_s, star_max_s, 8'h00} ),
+        .row3         ( row3_s ),
         .row3_en      ( ENABLE_STARS != 0 ),
-        .row4_bits    ( {cam_id_ok, cam_rw_ok, init_done, stream_ok,
+        .row4_bits    ( {cam_id_ok | cam_bridge_active, cam_rw_ok, init_done | cam_bridge_active, stream_ok,
                          data_alive, href_alive, vsync_alive, pclk_alive} ),
         .banner_level ( banner_level   ),
         .r            ( ovl_r          ),
@@ -550,24 +939,66 @@ module top_starfront #(
         ovl_b_d <= ovl_b;
     end
 
+    // Latch high once at least one valid frame has been processed by axis_cam_bridge
+    reg first_frame_captured = 1'b0;
+    always @(posedge clk_pix) begin
+        if (rst_pix)
+            first_frame_captured <= 1'b0;
+        else if (bridge_frame_done)
+            first_frame_captured <= 1'b1;
+    end
+
     // Show the numbers until the camera is configured, and whenever KEY2 is held
-    wire show_overlay = key2_pressed | ~init_done;
+    wire valid_video_available = (use_axis_cam ? first_frame_captured : (init_done & stream_ok));
+    wire show_overlay = key2_pressed | ~valid_video_available;
 
     //------------------------------------------------------------------------
-    // Crosshair on the brightest star. The detector works in the camera's
-    // 640x480 coordinates and the screen is 640x480, so the position needs no
-    // scaling - a 320x240 buffer pixel-doubled lands exactly on it.
-    //
-    // The middle of the cross is left open so the star itself stays visible.
+    // Markers. The detectors work in the camera's 640x480 coordinates and the
+    // screen is 640x480, so a position needs no scaling - a 320x240 buffer
+    // pixel-doubled lands exactly on it. M5 draws one cross on the brightest
+    // point; M7 draws one on every star in the list, with the same list
+    // walker the bench uses. The middle of a cross is left open so the star
+    // itself stays visible, and it is red, the only colour on a gray picture.
     //------------------------------------------------------------------------
-    wire [9:0] mark_dx = (pixel_x_d > bright_x_s) ? (pixel_x_d - bright_x_s)
-                                                  : (bright_x_s - pixel_x_d);
-    wire [9:0] mark_dy = (pixel_y_d > bright_y_s) ? (pixel_y_d - bright_y_s)
-                                                  : (bright_y_s - pixel_y_d);
+    wire show_mark;
 
-    wire mark_arm_h = (mark_dy == 10'd0) && (mark_dx >= 10'd4) && (mark_dx <= 10'd12);
-    wire mark_arm_v = (mark_dx == 10'd0) && (mark_dy >= 10'd4) && (mark_dy <= 10'd12);
-    wire show_mark  = (star_count_s != 8'd0) && (mark_arm_h || mark_arm_v);
+    generate
+    if (ENABLE_STARS == 1) begin : g_mark5
+
+        wire [9:0] mark_dx = (pixel_x_d > bright_x_s) ? (pixel_x_d - bright_x_s)
+                                                      : (bright_x_s - pixel_x_d);
+        wire [9:0] mark_dy = (pixel_y_d > bright_y_s) ? (pixel_y_d - bright_y_s)
+                                                      : (bright_y_s - pixel_y_d);
+
+        wire mark_arm_h = (mark_dy == 10'd0) && (mark_dx >= 10'd4) && (mark_dx <= 10'd12);
+        wire mark_arm_v = (mark_dx == 10'd0) && (mark_dy >= 10'd4) && (mark_dy <= 10'd12);
+        assign show_mark  = (star_count_s != 8'd0) && (mark_arm_h || mark_arm_v);
+        assign m7_rd_addr = 6'd0;
+
+    end else if (ENABLE_STARS == 2) begin : g_mark7
+
+        star_marker #(
+            .CROP_X0(0), .CROP_Y0(0), .CROP_W(640), .CROP_H(480),
+            .SCALE_SHIFT(0), .CW(18), .FRAC(8)
+        ) u_mark (
+            .clk        ( clk_pix    ),
+            .rst        ( rst_pix    ),
+            .pixel_x    ( pixel_x_d  ),
+            .pixel_y    ( pixel_y_d  ),
+            .star_count ( m7_count_x ),
+            .rd_addr    ( m7_rd_addr ),
+            .rd_x       ( m7_rd_x    ),
+            .rd_y       ( m7_rd_y    ),
+            .mark       ( show_mark  )
+        );
+
+    end else begin : g_mark0
+
+        assign show_mark  = 1'b0;
+        assign m7_rd_addr = 6'd0;
+
+    end
+    endgenerate
 
     wire [7:0] src_r = show_overlay ? ovl_r_d : img_r;
     wire [7:0] src_g = show_overlay ? ovl_g_d : img_g;
@@ -596,15 +1027,19 @@ module top_starfront #(
     assign hdmi_out_en = 1'b1;
 
     //------------------------------------------------------------------------
-    // Status LEDs (active low)
+    // Status LEDs (active low on this board, so lit means the signal is high)
+    //   LED1  heartbeat
+    //   LED2  camera ID ok (or PS stream active)
+    //   LED3  init done (or PS stream active)
+    //   LED4  stream geometry ok
     //------------------------------------------------------------------------
     reg [23:0] heartbeat_cnt = 24'd0;
     always @(posedge clk_pix) heartbeat_cnt <= heartbeat_cnt + 24'd1;
 
-    wire [3:0] led = { stream_ok,               // LED4
-                       init_done,               // LED3
-                       cam_id_ok,               // LED2
-                       heartbeat_cnt[23] };     // LED1
+    wire [3:0] led = { stream_ok,                           // LED4
+                       init_done | cam_bridge_active,       // LED3
+                       cam_id_ok | cam_bridge_active,       // LED2
+                       heartbeat_cnt[23] };                 // LED1
     assign led_n = ~led;
 
     //------------------------------------------------------------------------

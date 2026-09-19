@@ -4,24 +4,27 @@ Carried over from the Basys 3 OV7670→VGA project, which reached a working live
 colour image. Everything in the "pitfalls" section below was paid for in days
 of debugging there; none of it is obvious from the datasheet.
 
-## Runtime grayscale mode is built in
+## The camera runs in grayscale, and that is not a mode
 
-The design has a runtime `gray_mode` select and the top level exposes it on
-`KEY3`. In the default state the sensor is configured for RGB565, which matches
-the 320×240 frame buffer and the live colour image. When `gray_mode` is asserted
-it reconfigures the OV7670 for YUV422 grayscale output (`COM7 = 0x00`,
-`COM15 = 0x00`), and the FPGA keeps only the luminance byte for each pixel.
+The sensor is configured for YUV422 (`COM7 = 0x00`, `COM15 = 0xC0`) and the
+FPGA keeps only the Y byte of each pair. There is no runtime RGB565 option and
+no `gray_mode` select: grayscale is the format the whole design is built around.
 
-That is the working mode for the astro path: the detector wants one 8-bit
-brightness sample per source pixel, not a 16-bit colour word. The design maps
-that Y byte back into the existing framebuffer path so the same live image
-pipeline still works, while the star engine consumes the full-resolution
-luminance stream directly from `cam_pixel_stream`.
+Two reasons it is not a toggle. The detector wants one 8-bit brightness sample
+per source pixel, and the sensor's own Y is that sample computed from all three
+channels at full precision - better than anything that can be recovered from a
+16-bit colour word after the fact. And the frame buffer halves, from 48 of the
+7z010's 60 RAMB36 tiles to 24, which is what leaves room for the centroiding
+pipeline: the `tracker` build lands at 27 tiles in total. Keeping a colour
+display path would cost those 24 tiles back and M7 would not fit.
 
-The colour-bar test pattern is still in the register ROM and is useful for
-bench debugging, but it is not the default bring-up mode in this build. The
-project now treats grayscale as the normal scientific mode and RGB565 as the
-reference display mode.
+An earlier revision carried a `gray_mode` key that switched the sensor between
+RGB565 and YUV422 at run time and packed Y back into the RGB565 buffer. It was
+the right idea one step early; the block RAM budget above is why it is not here.
+
+What *is* still a runtime choice is which byte of each YUV422 pair is the
+luminance - see pitfall 11 below. The colour-bar test pattern is also still in
+the register ROM, and in luminance it reads as a descending gray staircase.
 
 ## Pitfalls that cost real time on the previous board
 
@@ -96,6 +99,47 @@ so the stored pixel is simply the two bytes concatenated. If the colours come
 out scrambled in a way that looks like channels bleeding into each other, try
 `TSLB` (`0x3A`) `= 0x0C` to swap the byte order. If they are merely *wrong*
 rather than scrambled, it is the register config (pitfall 2), not the order.
+
+**Since superseded.** The design has moved on again, to YUV422 with only the
+Y byte kept - see pitfall 11. RGB565 is recorded here because it is the
+format the colour image was proven in, and because the same `TSLB[3]` bit
+that swaps the RGB bytes swaps the YUV ones.
+
+### 11. YUV422 byte order is a register bit, and the chip's default is the other one
+
+For star work the sensor's own luminance is what is wanted: a true 8-bit Y
+computed from all three channels inside the sensor, not one approximated from
+a 16-bit colour pixel, and at half the frame buffer. `COM7 = 0x00` selects
+YUV422; two bytes per pixel still come out, so the line geometry, PCLK rate
+and every downstream counter are unchanged from RGB565.
+
+Which byte is Y is `TSLB[3]` together with `COM13[0]`:
+
+| `TSLB[3]` | `COM13[0]` | sequence |
+|---|---|---|
+| 0 | 0 | Y U Y V - Y first, this table (`TSLB = 0x04`, `COM13 = 0xC0`) |
+| 0 | 1 | Y V Y U |
+| 1 | 0 | U Y V Y - the power-on default (`TSLB = 0x0D`) |
+| 1 | 1 | V Y U Y |
+
+Most "the OV7670's YUV bytes are backwards" reports come from projects that
+never wrote TSLB and so got the default, Y second. This design writes 0x04
+and expects Y first, and because that is a datasheet reading rather than a
+measurement, the FPGA side keeps the choice open: `y_second` in
+`top_starfront.v` selects the byte at run time (KEY2 held + KEY4), and the
+capture testbench checks that both picks land Y and that the wrong one lands
+chroma, so the swap is visible rather than silent.
+
+What the wrong byte looks like: the test bars come out bright and dark in a
+jumbled order instead of a descending gray staircase, because U and V of
+yellow, cyan and the rest are nowhere near their luminance; a live picture is a
+fine vertical comb, because U and V alternate pixel to pixel and the display
+path keeps every other pixel.
+
+The colour matrix, AWB and UV saturation registers are still written. They
+shape U and V, which are discarded; Y is the fixed BT.601 sum. They are left
+as they were because this is the table that was proven on hardware, and there
+is nothing to gain from changing registers whose output is thrown away.
 
 ### 8. Use the built-in colour bars to split the problem in two - but set the right register
 
@@ -177,9 +221,10 @@ The seam drifts because the two frame rates are close but not related:
 a ratio of 1.919, not 2, so the crossing point walks slowly down the picture.
 
 Removing it properly needs a second frame buffer to capture into while the
-first is displayed. That does not fit: RGB565 costs 48 of the 60 BRAM tiles and
-two of them would need 96. It becomes affordable at 8 bits per pixel, which is
-where the grayscale astro path is heading anyway.
+first is displayed. In RGB565 that did not fit: 48 of the 60 BRAM tiles for one
+buffer, 96 for two. At 8-bit luminance a buffer is 24 tiles, so two now fit
+with the ILA still in place; it has simply not been done yet, because star
+fields do not move fast enough to tear.
 
 It is worth being clear that this does not matter for the actual application.
 Star fields do not move fast, and the centroid engine planned for M5 processes
@@ -197,11 +242,46 @@ frame buffer exists so a human can see what the camera sees.
 
 Device address is `0x42` for a write and `0x43` for a read.
 
-## Register profile for star tracking (planned, milestone 5)
+## Register profile for star tracking
 
 The 94-register table from the Basys 3 project is tuned for a pleasant-looking
 consumer image, and almost every one of those choices is wrong for photographing
-stars. When the astro path is built it needs a **separate** profile:
+stars. The astro profile exists as of 2026-09-12: `ov7670_registers.v` takes
+an `astro` input and a two-bit `preset`, and the `tracker` build toggles them
+from KEY3 (alone: astro on/off; with KEY2 held: next preset). Changing either
+re-runs the whole table. It overrides only these entries and leaves the rest of
+the proven table alone:
+
+| register | consumer | astro | why |
+|---|---|---|---|
+| COM8 `0x13` | `0xE7` | `0xE0` | AGC, AEC and AWB off; `0xE0` is the value the table already uses mid-sequence |
+| COM13 `0x3D` | `0xC0` | `0x40` | gamma bypassed, so Y is linear |
+| COM16 `0x41` | `0x18` | `0x00` | edge enhancement and de-noise off |
+| REG76 `0x76` | `0xE1` | `0x21` | black and white pixel correction off |
+| EDGE `0x3F`, DNSTH `0x4C` | untouched | `0x00` | nothing left sharpening or smoothing |
+| AECHH `0x07`, AECH `0x10`, COM1 `0x04` | AEC-driven | 504 lines | one whole frame of exposure |
+| GAIN `0x00`, CLKRC `0x11` | `0x00`, `0x80` | per preset | see below |
+
+Exposure is always a full frame. The presets stretch the frame with the clock
+prescaler, which stretches the exposure with it, and raise the gain:
+
+| preset | CLKRC | PCLK | frame | exposure | GAIN | overlay row 0 |
+|---|---|---|---|---|---|---|
+| 0 | `0x80` | 25 MHz | 30 fps | 16 ms | `0x10` ~2x | `81` |
+| 1 | `0x83` | 6.25 MHz | 7.5 fps | 63 ms | `0x40` ~4x | `A1` |
+| 2 | `0x8F` | 1.56 MHz | 1.9 fps | 253 ms | `0x70` ~8x | `C1` |
+| 3 | `0x9F` | 0.78 MHz | 0.94 fps | 505 ms | `0xF0` ~16x | `E1` |
+
+Everything downstream counts PCLK edges, so the capture, the detector and the
+geometry probe simply run slower; the overlay's PCLK/100kHz and frames/sec
+readouts show it (`00FA 001E` at preset 0, `0007 0000` at preset 3). Longer
+still needs dummy lines (`0x92`/`0x93`), which is the next lever if half a
+second is not enough.
+
+**None of this has been pointed at a sky.** The values are datasheet reasoning
+and the consumer table's own proven fragments; the first night test is what
+decides whether the gain steps are sensible and whether the sensor sees
+anything at all. The reasoning behind each choice:
 
 - **Manual exposure and gain.** `COM8 = 0x00` turns off AGC, AEC and AWB.
   Auto-exposure will happily crush a field of faint stars into black because
@@ -214,8 +294,9 @@ stars. When the astro path is built it needs a **separate** profile:
   on small bright features — which is exactly what a star is. Denoise will
   delete them.
 - **YUV422 output** (`COM7 = 0x00`), keeping only the Y bytes. That gives a
-  true 8-bit luminance image at half the storage of RGB444, and luminance is
-  what a centroid algorithm actually consumes.
+  true 8-bit luminance image at half the storage of RGB565, and luminance is
+  what a centroid algorithm actually consumes. This one is on in both
+  profiles - see pitfall 11 for the byte order.
 
 Also worth stating plainly: the OV7670 is a rolling-shutter consumer sensor with
 small pixels and a limited maximum exposure. It is fine for proving the pipeline,

@@ -2,19 +2,64 @@
 
 //============================================================================
 // Module: ov7670_registers
-// Description: 94-entry OV7670 configuration ROM for native RGB444 output.
+// Description: 94-entry OV7670 configuration ROM for YUV422 output, of which
+//              the design keeps only the Y byte.
 //
-// Carried over unchanged from the Basys 3 OV7670 project, where this exact
-// table produced a correct live colour image. Sources: westonb/OV7670-Verilog
-// (MIT 6.111), the Linux kernel ov7670.c driver, and the Hamsterworks project.
+// Carried over from the Basys 3 OV7670 project, where this exact table (with
+// COM7 set to RGB) produced a correct live colour image. Sources:
+// westonb/OV7670-Verilog (MIT 6.111), the Linux kernel ov7670.c driver, and
+// the Hamsterworks project.
 //
-// Output format: RGB565 (COM15[5:4] = 01, with RGB444 switched off at 0x8C),
+// Output format: YUV422 (COM7 = 0x00), full 0x00-0xFF range (COM15[7:6]),
 // full VGA 640x480 with camera-side scaling OFF - the FPGA does the
-// downsampling. RGB565 replaced the original RGB444 because four bits per
-// channel is only sixteen levels: in a dim scene almost every pixel sits in the
-// bottom two or three of them, so a single LSB of sensor noise is a sixth of the
-// signal and the picture looks like coloured static. Green gets six bits here
-// and red and blue five, which is three to four times finer.
+// downsampling. Two bytes per pixel still come out, Y and one of U or V, and
+// the capture logic keeps Y. That is the sensor's own luminance at full 8-bit
+// precision, which is what a star detector wants and what a 16-bit colour
+// pixel had to be approximated into; it also halves the frame buffer.
+//
+// Byte order. With TSLB[3] = 0 and COM13[0] = 0, as written below, the
+// sequence is Y U Y V - Y first in each pair. The sensor's power-on default
+// (TSLB = 0x0D) is U Y V Y, Y second, which is what most "the byte order is
+// wrong" reports are about. The FPGA side selects the byte at run time
+// (y_second in cam_capture), so if the first picture is a jumble of stripes,
+// the fix is a key press and not a change here.
+//
+// The colour matrix, the AWB block and UV saturation are still programmed.
+// They only shape U and V, which are thrown away, and they are left exactly as
+// they were because this table is the hardware-proven one.
+//
+// astro selects the star-field profile. The consumer table above turns on
+// everything that makes a daylight picture pleasant, and every one of those
+// things works against photographing stars: auto exposure crushes a mostly
+// empty frame into black, the gamma curve lifts the noise floor and flattens
+// the cores, and de-noise, edge enhancement and white-pixel correction are all
+// designed to remove a small bright speck - which is what a star is. The
+// astro profile changes only those registers and leaves the rest of the
+// proven table alone:
+//
+//   COM8   0xE0   AGC, AEC and AWB off (the value the table already uses
+//                 while it sets the limits, so it is known to be safe)
+//   COM13  0x40   gamma bypassed; the output is the sensor's linear Y
+//   COM16  0x00   edge enhancement and de-noise off
+//   REG76  0x21   black and white pixel correction off
+//   EDGE, DNSTH   0x00, so nothing is left sharpening or smoothing
+//   AECHH/AECH/COM1  a fixed exposure of 504 lines - one whole frame
+//   GAIN, CLKRC   from the preset below
+//
+// preset picks exposure time and gain, because without a UART there is no
+// other way to tune them on the bench. Exposure is always a full frame; the
+// clock prescaler in CLKRC stretches the frame, and with it the exposure:
+//
+//   preset  CLKRC  PCLK       frame     exposure   GAIN
+//     0     0x80   25 MHz     30 fps    16 ms      0x10  ~2x
+//     1     0x83   6.25 MHz   7.5 fps   63 ms      0x40  ~4x
+//     2     0x8F   1.56 MHz   1.9 fps   253 ms     0x70  ~8x
+//     3     0x9F   0.78 MHz   0.94 fps  505 ms     0xF0  ~16x
+//
+// Everything downstream counts PCLK edges and does not care how fast they
+// come, so the picture and the detector simply run at the slower rate. The
+// overlay's PCLK/100kHz and frames/sec readouts show the change. None of this
+// has been pointed at a real sky yet; the values are datasheet reasoning.
 //
 // color_bar selects the sensor's built-in 8-bar test pattern. Per the datasheet
 // the two selector bits are (SCALING_YSC[7], SCALING_XSC[7]) in that order:
@@ -34,10 +79,26 @@
 module ov7670_registers (
     input  wire [7:0]  index,
     input  wire        color_bar,    // 1 = 8-bar test pattern instead of the image
-    input  wire        gray_mode,    // 1 = YUV422 grayscale mode, 0 = RGB565 mode
     input  wire [1:0]  hstart_sel,   // horizontal window position, see below
+    input  wire        astro,        // 1 = star-field profile, see above
+    input  wire [1:0]  preset,       // exposure / gain preset, astro only
     output reg  [15:0] data
 );
+
+    //------------------------------------------------------------------------
+    // Exposure and gain presets for the astro profile
+    //------------------------------------------------------------------------
+    reg [7:0] clkrc_reg;
+    reg [7:0] gain_reg;
+
+    always @(*) begin
+        case (preset)
+        2'd0:    begin clkrc_reg = 8'h80; gain_reg = 8'h10; end
+        2'd1:    begin clkrc_reg = 8'h83; gain_reg = 8'h40; end
+        2'd2:    begin clkrc_reg = 8'h8F; gain_reg = 8'h70; end
+        default: begin clkrc_reg = 8'h9F; gain_reg = 8'hF0; end
+        endcase
+    end
 
     //------------------------------------------------------------------------
     // Horizontal window position.
@@ -84,27 +145,30 @@ module ov7670_registers (
         8'd0:  data = 16'h12_80;  // COM7: Reset all registers
 
         //==============================================================
-        // OUTPUT FORMAT — RGB565 or YUV422 grayscale
+        // OUTPUT FORMAT — YUV422
         //==============================================================
-        8'd1:  data = gray_mode ? 16'h12_00 : 16'h12_04;  // COM7: YUV422 grayscale or RGB output
-        8'd2:  data = gray_mode ? 16'h40_00 : 16'h40_D0;  // COM15: default YUV path or RGB565
-        8'd3:  data = 16'h8C_00;  // RGB444 off; harmless in either mode
+        8'd1:  data = 16'h12_00;  // COM7: YUV output
+        8'd2:  data = 16'h40_C0;  // COM15: full 00-FF output range; [5:4] unused in YUV
+        8'd3:  data = 16'h8C_00;  // RGB444 off (ignored in YUV mode, kept explicit)
         8'd4:  data = 16'h04_00;  // COM1: No CCIR656
 
         //==============================================================
         // CLOCK
         //==============================================================
-        8'd5:  data = 16'h11_80;  // CLKRC: Use external clock directly
+        8'd5:  data = astro ? {8'h11, clkrc_reg}   // CLKRC: prescaler per preset
+                            : 16'h11_80;           // CLKRC: use external clock directly
         8'd6:  data = 16'h6B_0A;  // DBLV: PLL bypass, reserved bits
 
         //==============================================================
         // DATA FORMAT & BYTE ORDER
         //==============================================================
-        8'd7:  data = 16'h3A_04;  // TSLB: Standard byte order, auto-window
-        8'd8:  data = 16'h3D_C0;  // COM13: Gamma enable + UV sat auto
+        8'd7:  data = 16'h3A_04;  // TSLB: [3]=0 -> Y first (Y U Y V); default 0x0D is Y second
+        8'd8:  data = astro ? 16'h3D_40            // COM13: gamma OFF for astro
+                            : 16'h3D_C0;           // COM13: Gamma enable + UV sat auto, [0]=0 keeps U before V
 
         //==============================================================
         // COLOR MATRIX (RGB565 coefficients — Linux kernel / OmniVision)
+        // Shapes U and V only; Y is fixed BT.601 luma. Left as proven.
         //==============================================================
         8'd9:  data = 16'h4F_B3;  // MTX1
         8'd10: data = 16'h50_B3;  // MTX2
@@ -118,8 +182,10 @@ module ov7670_registers (
         // AGC / AEC / AWB
         //==============================================================
         8'd16: data = 16'h13_E0;  // COM8: Disable AGC+AEC+AWB temporarily
-        8'd17: data = 16'h00_00;  // GAIN: Reset gain
-        8'd18: data = 16'h10_00;  // AECH: Reset exposure
+        8'd17: data = astro ? {8'h00, gain_reg}    // GAIN: fixed, per preset
+                            : 16'h00_00;           // GAIN: Reset gain
+        8'd18: data = astro ? 16'h10_7E            // AECH: exposure[9:2], 504 lines
+                            : 16'h10_00;           // AECH: Reset exposure
         8'd19: data = 16'h0D_40;  // COM4: Reserved magic bit
         8'd20: data = 16'h14_18;  // COM9: AGC ceiling 4x
         8'd21: data = 16'hA5_05;  // BD50MAX
@@ -135,7 +201,8 @@ module ov7670_registers (
         8'd31: data = 16'hA8_F0;  // HAECC6
         8'd32: data = 16'hA9_90;  // HAECC7
         8'd33: data = 16'hAA_94;  // HAECC8
-        8'd34: data = 16'h13_E7;  // COM8: Re-enable AGC + AEC + AWB
+        8'd34: data = astro ? 16'h13_E0            // COM8: astro keeps them off
+                            : 16'h13_E7;           // COM8: Re-enable AGC + AEC + AWB
 
         //==============================================================
         // GAMMA CURVE
@@ -225,9 +292,23 @@ module ov7670_registers (
         //==============================================================
         // EDGE / DENOISE
         //==============================================================
-        8'd91: data = 16'h41_18;  // COM16: Edge enhance + denoise enable
+        8'd91: data = astro ? 16'h41_00            // COM16: edge enhance + denoise OFF
+                            : 16'h41_18;           // COM16: Edge enhance + denoise enable
         8'd92: data = 16'h4E_20;  // Edge enhance factor
-        8'd93: data = 16'h76_E1;  // DNSTH: Denoise threshold
+        8'd93: data = astro ? 16'h76_21            // REG76: pixel corrections OFF
+                            : 16'h76_E1;           // REG76: black + white pixel correction
+
+        //==============================================================
+        // ASTRO-ONLY REGISTERS. In the consumer profile these slots repeat
+        // three writes already made above, so the proven sequence is not
+        // changed by the table growing.
+        //==============================================================
+        8'd94: data = astro ? 16'h07_00            // AECHH: exposure[15:10] = 0
+                            : 16'h15_00;           // (repeat) COM10
+        8'd95: data = astro ? 16'h3F_00            // EDGE: enhancement factor 0
+                            : 16'h3C_78;           // (repeat) COM12
+        8'd96: data = astro ? 16'h4C_00            // DNSTH: de-noise threshold 0
+                            : 16'h69_00;           // (repeat) GFIX
 
         //==============================================================
         // SENTINEL — end of configuration

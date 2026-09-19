@@ -8,4 +8,5 @@ dependencies = [
     "cocotb>=2.0.1",
     "numpy>=2.0",
     "pytest>=8.0",
+    "pillow>=10.0",
 ]

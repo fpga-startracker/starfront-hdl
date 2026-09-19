@@ -4,6 +4,8 @@
 #
 #   ./scripts/open_gui.sh bringup
 #   ./scripts/open_gui.sh tracker
+#   ./scripts/open_gui.sh stream
+#   ./scripts/open_gui.sh bench
 #   ./scripts/open_gui.sh bringup --regen    regenerate first, then open
 #
 # Why this exists: a GUI session left open across a build writes its own
@@ -20,8 +22,8 @@ VARIANT="${1:-}"
 REGEN="${2:-}"
 
 case "$VARIANT" in
-    bringup|tracker) ;;
-    *) echo "usage: $0 {bringup|tracker} [--regen]" >&2; exit 1 ;;
+    bringup|tracker|stream|bench) ;;
+    *) echo "usage: $0 {bringup|tracker|stream|bench} [--regen]" >&2; exit 1 ;;
 esac
 
 XPR="$REPO_DIR/build/starfront_$VARIANT/starfront_$VARIANT.xpr"
