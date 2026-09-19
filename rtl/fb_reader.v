@@ -6,8 +6,9 @@
 //              pixel doubling so the 320x240 buffer fills the 640x480 screen.
 //
 //   Ported from the Basys 3 vga_controller, minus the sync generator (which
-//   lives separately here) and with the RGB565 channels expanded to the 8-bit
-//   ones the TMDS encoder wants.
+//   lives separately here). The buffer holds 8-bit luminance, which goes out
+//   on all three channels - the TMDS encoder does not know or care that the
+//   picture is gray.
 //
 //   Latency is one clock: fb_addr_rd is combinational from the pixel position,
 //   and the block RAM registers its output. The top level delays hsync, vsync
@@ -20,7 +21,7 @@ module fb_reader (
     input  wire        active,       // already delayed to match fb_data_rd
 
     output wire [16:0] fb_addr_rd,
-    input  wire [15:0] fb_data_rd,   // {R[4:0], G[5:0], B[4:0]}
+    input  wire [7:0]  fb_data_rd,   // Y, 0..255
 
     output wire [7:0]  r,
     output wire [7:0]  g,
@@ -42,16 +43,12 @@ module fb_reader (
                       + {8'b0, logical_x};
 
     //------------------------------------------------------------------------
-    // RGB565 -> RGB888. The top bits are replicated into the low ones so that
-    // an all-ones channel maps to 0xFF rather than 0xF8, which would otherwise
-    // stop white from ever being white.
+    // Gray: the same byte on every channel.
     //------------------------------------------------------------------------
-    wire [4:0] r5 = fb_data_rd[15:11];
-    wire [5:0] g6 = fb_data_rd[10:5];
-    wire [4:0] b5 = fb_data_rd[4:0];
+    wire [7:0] y = active ? fb_data_rd : 8'h00;
 
-    assign r = active ? {r5, r5[4:2]} : 8'h00;
-    assign g = active ? {g6, g6[5:4]} : 8'h00;
-    assign b = active ? {b5, b5[4:2]} : 8'h00;
+    assign r = y;
+    assign g = y;
+    assign b = y;
 
 endmodule

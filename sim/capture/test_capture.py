@@ -3,11 +3,17 @@
 This is the path that produced rainbow noise and coloured left edges on the
 predecessor board, so the checks here are deliberately about those two bugs:
 
-  * every captured pixel must carry the RGB565 value of the pixel it came from,
-    which only holds if both bytes are read from registers rather than straight
+  * every captured pixel must carry the luminance of the pixel it came from,
+    which only holds if the bytes are read from registers rather than straight
     off the bus (docs/ov7670_notes.md, pitfall 1);
   * pixel 0 of each line must never be written, because the staging registers
     still hold the end of the previous line at that point (pitfall 4).
+
+The sensor sends YUV422, two bytes per pixel, and the capture keeps only Y.
+Which byte of the pair is Y depends on TSLB[3], so the model here can emit
+either order and the tests check that y_second picks the right one - and that
+picking the wrong one lands the chroma byte in the buffer, so the swap is
+observable rather than a no-op.
 
 Frames here are small - the address arithmetic is the same 320-pixel stride the
 real design uses, so a small frame simply fills the top-left corner of the
@@ -24,23 +30,27 @@ RD_PERIOD_NS = 40
 FB_STRIDE = 320
 
 
-def src_rgb(x, y):
-    """Test pattern: distinct per pixel, and different in all three channels.
-    Channel widths follow RGB565."""
-    return ((x + y) & 0x1F, (x * 3) & 0x3F, (y * 5 + 1) & 0x1F)
+def src_luma(x, y):
+    """Test pattern: distinct per pixel, never equal to the chroma value at
+    the same position so a wrong byte pick cannot pass by accident."""
+    return (x * 7 + y * 13 + 1) & 0xFF
 
 
-def rgb565_bytes(r, g, b):
-    """The two bytes an OV7670 emits for one RGB565 pixel."""
-    return (r << 3) | (g >> 3), ((g & 0x07) << 5) | b
+def src_chroma(x, y):
+    """The U or V byte that shares a pair with pixel (x, y). Kept away from
+    src_luma at every position."""
+    return (src_luma(x, y) + 0x80) & 0xFF
 
 
-def rgb565_word(r, g, b):
-    hi, lo = rgb565_bytes(r, g, b)
-    return (hi << 8) | lo
+def pair_bytes(x, y, y_second):
+    """The two bytes an OV7670 emits for one pixel in YUV422:
+    Y then chroma with TSLB[3] = 0, chroma then Y with TSLB[3] = 1."""
+    if y_second:
+        return src_chroma(x, y), src_luma(x, y)
+    return src_luma(x, y), src_chroma(x, y)
 
 
-async def send_frame(dut, n_pixels, n_lines):
+async def send_frame(dut, n_pixels, n_lines, y_second=False):
     """Drive one frame the way an OV7670 does: data changes on the PCLK falling
     edge, two bytes per pixel, HREF high for the active part of each line."""
     dut.vsync.value = 1
@@ -54,10 +64,10 @@ async def send_frame(dut, n_pixels, n_lines):
         await FallingEdge(dut.pclk)
         dut.href.value = 1
         for x in range(n_pixels):
-            hi, lo = rgb565_bytes(*src_rgb(x, y))
-            dut.data.value = hi                   # byte 1: {R[4:0], G[5:3]}
+            b1, b2 = pair_bytes(x, y, y_second)
+            dut.data.value = b1
             await FallingEdge(dut.pclk)
-            dut.data.value = lo                   # byte 2: {G[2:0], B[4:0]}
+            dut.data.value = b2
             await FallingEdge(dut.pclk)
         dut.href.value = 0
         await ClockCycles(dut.pclk, 6)
@@ -68,7 +78,7 @@ async def send_frame(dut, n_pixels, n_lines):
     await ClockCycles(dut.pclk, 4)
 
 
-def expected_buffer(n_pixels, n_lines):
+def expected_buffer(n_pixels, n_lines, value=src_luma):
     """What should be in the frame buffer: even pixels of even lines, with
     pixel 0 of each line skipped."""
     out = {}
@@ -79,12 +89,12 @@ def expected_buffer(n_pixels, n_lines):
             if x + 1 >= n_pixels:
                 continue                       # write lands on the next pixel
             addr = (y // 2) * FB_STRIDE + (x // 2)
-            out[addr] = rgb565_word(*src_rgb(x, y))
+            out[addr] = value(x, y)
     return out
 
 
 async def read_fb(dut, addr):
-    """Read one frame buffer word.
+    """Read one frame buffer byte.
 
     The address has to be in place before the edge that latches it, and the
     registered output is only settled by the following falling edge - reading
@@ -97,33 +107,56 @@ async def read_fb(dut, addr):
     return int(dut.rd_data.value)
 
 
-async def setup(dut):
+async def setup(dut, y_second=False):
     cocotb.start_soon(Clock(dut.pclk, PCLK_PERIOD_NS, unit="ns").start())
     cocotb.start_soon(Clock(dut.rd_clk, RD_PERIOD_NS, unit="ns").start())
     dut.href.value = 0
     dut.vsync.value = 0
     dut.data.value = 0
     dut.rd_addr.value = 0
+    dut.y_second.value = 1 if y_second else 0
     await ClockCycles(dut.pclk, 4)
 
 
-@cocotb.test()
-async def test_pixels_land_correctly(dut):
-    """Every captured pixel carries the colour of the pixel it came from."""
-    n_pixels, n_lines = 32, 8
-    await setup(dut)
-    await send_frame(dut, n_pixels, n_lines)
-
-    expect = expected_buffer(n_pixels, n_lines)
+async def check_buffer(dut, expect, label):
     assert expect, "test would pass vacuously"
-
     for addr in sorted(expect):
         got = await read_fb(dut, addr)
         want = expect[addr]
         assert got == want, (
-            f"frame buffer[{addr}] = 0x{got:04X}, expected 0x{want:04X} "
+            f"{label}: frame buffer[{addr}] = 0x{got:02X}, expected 0x{want:02X} "
             f"(pixel x={(addr % FB_STRIDE) * 2}, y={(addr // FB_STRIDE) * 2})"
         )
+
+
+@cocotb.test()
+async def test_pixels_land_correctly(dut):
+    """Every captured pixel carries the luminance of the pixel it came from,
+    with the sensor sending Y first (the register table's order)."""
+    n_pixels, n_lines = 32, 8
+    await setup(dut, y_second=False)
+    await send_frame(dut, n_pixels, n_lines, y_second=False)
+    await check_buffer(dut, expected_buffer(n_pixels, n_lines), "Y first")
+
+
+@cocotb.test()
+async def test_y_second_selects_the_other_byte(dut):
+    """With the sensor sending chroma first, y_second = 1 still lands Y."""
+    n_pixels, n_lines = 32, 8
+    await setup(dut, y_second=True)
+    await send_frame(dut, n_pixels, n_lines, y_second=True)
+    await check_buffer(dut, expected_buffer(n_pixels, n_lines), "Y second")
+
+
+@cocotb.test()
+async def test_wrong_byte_pick_is_visible(dut):
+    """A mismatched y_second stores the chroma byte - the swap is not a no-op,
+    which is what makes the wrong order recognisable on the screen."""
+    n_pixels, n_lines = 32, 8
+    await setup(dut, y_second=True)
+    await send_frame(dut, n_pixels, n_lines, y_second=False)
+    await check_buffer(dut, expected_buffer(n_pixels, n_lines, src_chroma),
+                       "mismatched pick")
 
 
 @cocotb.test()
@@ -184,10 +217,4 @@ async def test_vsync_resets_position(dut):
     await send_frame(dut, n_pixels, n_lines)
     await send_frame(dut, n_pixels, n_lines)
 
-    expect = expected_buffer(n_pixels, n_lines)
-    for addr in sorted(expect):
-        got = await read_fb(dut, addr)
-        assert got == expect[addr], (
-            f"after two frames, buffer[{addr}] = 0x{got:04X}, "
-            f"expected 0x{expect[addr]:04X}"
-        )
+    await check_buffer(dut, expected_buffer(n_pixels, n_lines), "second frame")
